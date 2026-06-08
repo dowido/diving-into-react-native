@@ -5,6 +5,7 @@ import { ActivityIndicator, Animated, Image, Modal, Platform, Pressable, ScrollV
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CircuitMap } from '@/components/circuit-map';
+import { WeatherPanel } from '@/components/weather-panel';
 import { F1DriverCard } from '@/components/f1-driver-card';
 import { F1Telemetry } from '@/components/f1-telemetry';
 import { ThemedText } from '@/components/themed-text';
@@ -25,15 +26,16 @@ interface Driver {
 }
 
 interface LeaderboardEntry {
-  position: number | null;
-  driver_number: number;
-  driver: Driver;
-  gap_to_leader: number | string | null;
-  interval: number | string | null;
+  position:       number | null;
+  driver_number:  number;
+  driver:         Driver;
+  gap_to_leader:  number | string | null;
+  interval:       number | string | null;
   number_of_laps: number;
-  dnf: boolean;
-  dns: boolean;
-  compound?: string;
+  dnf:            boolean;
+  dns:            boolean;
+  compound?:      string;
+  stint_age?:     number;   // laps on current tyre
 }
 
 interface RaceControlMessage {
@@ -144,16 +146,23 @@ export default function LiveTimingScreen() {
       const driversMap = new Map<number, Driver>();
       driversData.forEach((d) => driversMap.set(d.driver_number, d));
 
-      // 3. Fetch stints (tyres compound info) — graceful
-      const latestStints = new Map<number, string>();
+      // 3. Fetch stints (tyres compound info + age) — graceful
+      const latestStints   = new Map<number, string>();
+      const latestStintAge = new Map<number, number>();  // laps on current tyre
       try {
         const stintsRes = await fetchWithRetry(`https://api.openf1.org/v1/stints?session_key=${sKey}`);
         if (stintsRes.ok) {
           const stintsData = await stintsRes.json();
           if (stintsData && stintsData.length > 0) {
-            const sortedStints = [...stintsData].sort((a, b) => a.lap_start - b.lap_start);
+            const sortedStints = [...stintsData].sort((a: any, b: any) => a.lap_start - b.lap_start);
+            const latestStintMap = new Map<number, any>();
             sortedStints.forEach((st: any) => {
               if (st.compound) latestStints.set(st.driver_number, st.compound);
+              latestStintMap.set(st.driver_number, st);
+            });
+            const maxLap = Math.max(...sortedStints.map((s: any) => s.lap_end ?? s.lap_start));
+            latestStintMap.forEach((st, num) => {
+              latestStintAge.set(num, maxLap - st.lap_start + 1);
             });
           }
         }
@@ -223,17 +232,18 @@ export default function LiveTimingScreen() {
           };
 
           return {
-            position: res.position,
-            driver_number: res.driver_number,
-            driver: drv,
-            gap_to_leader: res.gap_to_leader !== null && res.gap_to_leader !== undefined 
+            position:       res.position,
+            driver_number:  res.driver_number,
+            driver:         drv,
+            gap_to_leader:  res.gap_to_leader !== null && res.gap_to_leader !== undefined 
               ? (typeof res.gap_to_leader === 'number' ? `+${res.gap_to_leader.toFixed(3)}s` : res.gap_to_leader)
               : (res.position === 1 ? 'LEADER' : '--'),
-            interval: res.position === 1 ? 'LEADER' : '--',
+            interval:       res.position === 1 ? 'LEADER' : '--',
             number_of_laps: res.number_of_laps || 0,
-            dnf: !!res.dnf,
-            dns: !!res.dns,
-            compound: latestStints.get(res.driver_number),
+            dnf:            !!res.dnf,
+            dns:            !!res.dns,
+            compound:       latestStints.get(res.driver_number),
+            stint_age:      latestStintAge.get(res.driver_number),
           };
         });
         
@@ -586,6 +596,7 @@ export default function LiveTimingScreen() {
                   <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
                   <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
                   <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">LAPS</ThemedText>
+                  <ThemedText type="code" style={styles.colAge} themeColor="textSecondary">AGE</ThemedText>
                   <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">GAP</ThemedText>
                 </View>
 
@@ -673,6 +684,15 @@ export default function LiveTimingScreen() {
                         {entry.number_of_laps}
                       </ThemedText>
 
+                      {/* Stint age */}
+                      <ThemedText
+                        type="code"
+                        style={[styles.colAge, entry.stint_age && entry.stint_age > 20 ? { color: '#f59e0b' } : undefined]}
+                        themeColor={entry.stint_age && entry.stint_age > 20 ? undefined : 'textSecondary'}
+                      >
+                        {entry.stint_age ?? '—'}
+                      </ThemedText>
+
                       {/* Gap */}
                       <ThemedText type="code" style={styles.colGap} themeColor="text">
                         {entry.gap_to_leader}
@@ -687,6 +707,9 @@ export default function LiveTimingScreen() {
           {/* TELEMETRY & FEED DETAILS SIDEBAR (ONLY ON WEB) */}
           {Platform.OS === 'web' && selectedEntry && (
             <View style={styles.sidebarContainer}>
+              {/* Weather conditions */}
+              <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
+
               {/* Circuit Map */}
               <CircuitMap
                 sessionKey={session?.session_key ?? null}
@@ -713,9 +736,10 @@ export default function LiveTimingScreen() {
             </View>
           )}
 
-          {/* ON MOBILE, RENDER CIRCUIT MAP + RACE CONTROL FEED BELOW THE STANDINGS */}
+          {/* ON MOBILE, RENDER WEATHER + CIRCUIT MAP + RACE CONTROL FEED BELOW THE STANDINGS */}
           {Platform.OS !== 'web' && (
             <View style={styles.leaderboardContainer}>
+              <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
               <CircuitMap
                 sessionKey={session?.session_key ?? null}
                 drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
@@ -1020,9 +1044,15 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   colLaps: {
-    width: 45,
+    width: 40,
     fontSize: 10,
     textAlign: 'center',
+  },
+  colAge: {
+    width: 32,
+    fontSize: 9.5,
+    textAlign: 'center',
+    fontWeight: 'bold',
   },
   colGap: {
     flex: 1.2,

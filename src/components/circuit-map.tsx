@@ -22,6 +22,13 @@ import { fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
+import {
+  computeCanvasBounds,
+  toScreenXY,
+  downsample,
+  CanvasBounds,
+  toPolylineString,
+} from '@/utils/coordinate-normaliser';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,52 +62,7 @@ const MAP_WIDTH = 340;
 const MAP_HEIGHT = 200;
 const MAP_PADDING = 14;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-interface Bounds {
-  minX: number; maxX: number; minY: number; maxY: number;
-  scale: number; offX: number; offY: number;
-}
-
-function computeBounds(pts: { x: number; y: number }[]): Bounds | null {
-  if (pts.length === 0) return null;
-  let minX = pts[0].x, maxX = pts[0].x;
-  let minY = pts[0].y, maxY = pts[0].y;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  }
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const usableW = MAP_WIDTH - MAP_PADDING * 2;
-  const usableH = MAP_HEIGHT - MAP_PADDING * 2;
-  const scale = Math.min(usableW / rangeX, usableH / rangeY);
-  const drawW = rangeX * scale;
-  const drawH = rangeY * scale;
-  const offX = MAP_PADDING + (usableW - drawW) / 2;
-  const offY = MAP_PADDING + (usableH - drawH) / 2;
-  return { minX, maxX, minY, maxY, scale, offX, offY };
-}
-
-function toMapXY(b: Bounds, rawX: number, rawY: number) {
-  return {
-    x: b.offX + (rawX - b.minX) * b.scale,
-    y: b.offY + (b.maxY - rawY) * b.scale, // Flip Y
-  };
-}
-
-/** Build sampled path points list from location data */
-function buildPath(pts: LocationPoint[], maxPts = 500) {
-  const step = Math.max(1, Math.floor(pts.length / maxPts));
-  return pts.filter((_, i) => i % step === 0).map(p => ({ x: p.x, y: p.y }));
-}
-
-/** Convert to SVG polyline points string */
-function toSvgPoints(pts: { x: number; y: number }[]) {
-  return pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-}
+// Helpers are imported from coordinate-normaliser.ts
 
 // ─── Web SVG renderer (uses raw DOM svg, no react-native-svg) ─────────────────
 
@@ -119,7 +81,7 @@ function WebCircuitSvg({
   bgColor: string;
   trackColor: string;
 }) {
-  const polylinePoints = toSvgPoints(trackPoints);
+  const polylinePoints = toPolylineString(trackPoints);
 
   return (
     <svg
@@ -204,7 +166,7 @@ if (Platform.OS !== 'web') {
     bgColor,
     trackColor,
   }) => {
-    const polylinePoints = toSvgPoints(trackPoints);
+    const polylinePoints = toPolylineString(trackPoints);
     return (
       <Svg width="100%" height={MAP_HEIGHT} viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}>
         <Rect x={0} y={0} width={MAP_WIDTH} height={MAP_HEIGHT} fill={bgColor} rx={8} />
@@ -254,7 +216,7 @@ export function CircuitMap({
   const [driverPositions, setDriverPositions] = useState<Map<number, { x: number; y: number }>>(new Map());
 
   // Keep raw data + bounds for driver dot mapping
-  const boundsRef = useRef<Bounds | null>(null);
+  const boundsRef = useRef<CanvasBounds | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -287,12 +249,12 @@ export function CircuitMap({
         const data: LocationPoint[] = await res.json();
         if (ac.signal.aborted) return;
 
-        const sampled = buildPath(data, 500);
-        const bounds = computeBounds(sampled);
+        const sampled = downsample(data, 500);
+        const bounds = computeCanvasBounds(sampled, MAP_WIDTH, MAP_HEIGHT, MAP_PADDING);
         boundsRef.current = bounds;
 
         if (bounds) {
-          const normalized = sampled.map(p => toMapXY(bounds, p.x, p.y));
+          const normalized = sampled.map(p => toScreenXY(bounds, p.x, p.y));
           setTrackNormalized(normalized);
         }
       } catch (err: any) {
@@ -338,7 +300,7 @@ export function CircuitMap({
 
       const newPos = new Map<number, { x: number; y: number }>();
       latest.forEach((pt, num) => {
-        newPos.set(num, toMapXY(bounds, pt.x, pt.y));
+        newPos.set(num, toScreenXY(bounds, pt.x, pt.y));
       });
       setDriverPositions(newPos);
     } catch (err: any) {

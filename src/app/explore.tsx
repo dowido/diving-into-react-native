@@ -7,9 +7,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
+import { StrategyChart } from '@/components/strategy-chart';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
+import { apiCache, TTL } from '@/utils/api-cache';
 
 interface Session {
   session_key: number;
@@ -101,10 +103,16 @@ export default function ExploreSessionsScreen() {
       const fetchSessions = async () => {
         try {
           setLoading(true);
-          const res = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');
-          if (cancelled) return;
-          if (!res.ok) throw new Error('Failed to fetch sessions');
-          const data: Session[] = await res.json();
+          const data = await apiCache.fetch(
+            'sessions-2026',
+            async () => {
+              const res = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');
+              if (!res.ok) throw new Error('Failed to fetch sessions');
+              return res.json();
+            },
+            TTL.raceCalendar
+          );
+
           if (cancelled) return;
 
           if (data && data.length > 0) {
@@ -188,37 +196,46 @@ export default function ExploreSessionsScreen() {
     const fetchResults = async () => {
       try {
         setResultsLoading(true);
-        const resultsRes = await fetchWithRetry(
-          `https://api.openf1.org/v1/session_result?session_key=${selectedSessionKey}`
-        );
-        // 404 means results not yet available — show empty gracefully
-        if (resultsRes.status === 404) {
-          if (active) {
-            setSessionResults([]);
-            setResultsLoading(false);
-          }
-          return;
-        }
-        if (!resultsRes.ok) throw new Error('Results fetch failed');
-        const results: ResultEntry[] = await resultsRes.json();
 
-        const driversRes = await fetchWithRetry(
-          `https://api.openf1.org/v1/drivers?session_key=${selectedSessionKey}`
+        const results = await apiCache.fetch(
+          `session-results-${selectedSessionKey}`,
+          async () => {
+            const resultsRes = await fetchWithRetry(
+              `https://api.openf1.org/v1/session_result?session_key=${selectedSessionKey}`
+            );
+            if (resultsRes.status === 404) return [];
+            if (!resultsRes.ok) throw new Error('Results fetch failed');
+            return resultsRes.json();
+          },
+          TTL.sessionMeta
         );
-        if (!driversRes.ok) throw new Error('Drivers fetch failed');
-        const drivers = await driversRes.json();
-        const driversMap = new Map<number, any>();
-        drivers.forEach((d: any) => driversMap.set(d.driver_number, d));
 
         if (!active) return;
 
+        const drivers = await apiCache.fetch(
+          `session-drivers-${selectedSessionKey}`,
+          async () => {
+            const driversRes = await fetchWithRetry(
+              `https://api.openf1.org/v1/drivers?session_key=${selectedSessionKey}`
+            );
+            if (!driversRes.ok) throw new Error('Drivers fetch failed');
+            return driversRes.json();
+          },
+          TTL.driverRoster
+        );
+
+        if (!active) return;
+
+        const driversMap = new Map<number, any>();
+        drivers.forEach((d: any) => driversMap.set(d.driver_number, d));
+
         if (results && results.length > 0) {
-          const enrichedResults = results.map((entry) => ({
+          const enrichedResults = results.map((entry: any) => ({
             ...entry,
             driver: driversMap.get(entry.driver_number),
           }));
 
-          enrichedResults.sort((a, b) => {
+          enrichedResults.sort((a: any, b: any) => {
             if (a.position === null) return 1;
             if (b.position === null) return -1;
             return a.position - b.position;
@@ -377,6 +394,25 @@ export default function ExploreSessionsScreen() {
             );
           })}
         </View>
+
+        {selectedSession && sessionResults.length > 0 && (
+          <View style={{ marginTop: Spacing.four, paddingBottom: Spacing.three }}>
+            <StrategyChart
+              sessionKey={selectedSessionKey}
+              drivers={(() => {
+                const map = new Map<number, { name_acronym: string; team_colour: string }>();
+                sessionResults.forEach((entry) => {
+                  map.set(entry.driver_number, {
+                    name_acronym: entry.driver?.name_acronym || `${entry.driver_number}`,
+                    team_colour: entry.driver?.team_colour || '94a3b8',
+                  });
+                });
+                return map;
+              })()}
+              totalLaps={Math.max(0, ...sessionResults.map(r => r.number_of_laps))}
+            />
+          </View>
+        )}
       </ScrollView>
     );
   };

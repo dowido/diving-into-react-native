@@ -1,6 +1,6 @@
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -19,6 +19,15 @@ import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+interface Race {
+  round: string;
+  raceName: string;
+  date: string;
+  Circuit: {
+    Location: { locality: string; country: string };
+  };
+}
 
 interface DriverStanding {
   position: string;
@@ -50,7 +59,9 @@ interface ConstructorStanding {
   };
 }
 
-// ─── Team colour map ─────────────────────────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const SEASON = '2025';
 
 const TEAM_COLOURS: Record<string, string> = {
   mclaren: '#FF8000',
@@ -65,43 +76,33 @@ const TEAM_COLOURS: Record<string, string> = {
   alpine: '#FF87BC',
 };
 
-function teamColour(constructorId: string) {
-  return TEAM_COLOURS[constructorId] ?? '#94a3b8';
-}
-
-// ─── Nationality flag emoji map ───────────────────────────────────────────────
-
 const NATIONALITY_FLAG: Record<string, string> = {
-  British: '🇬🇧',
-  Dutch: '🇳🇱',
-  Australian: '🇦🇺',
-  German: '🇩🇪',
-  Monegasque: '🇲🇨',
-  Italian: '🇮🇹',
-  Thai: '🇹🇭',
-  Spanish: '🇪🇸',
-  French: '🇫🇷',
-  Canadian: '🇨🇦',
-  Japanese: '🇯🇵',
-  'New Zealander': '🇳🇿',
-  Brazilian: '🇧🇷',
-  Argentine: '🇦🇷',
-  Austrian: '🇦🇹',
-  American: '🇺🇸',
+  British: '🇬🇧', Dutch: '🇳🇱', Australian: '🇦🇺', German: '🇩🇪',
+  Monegasque: '🇲🇨', Italian: '🇮🇹', Thai: '🇹🇭', Spanish: '🇪🇸',
+  French: '🇫🇷', Canadian: '🇨🇦', Japanese: '🇯🇵', 'New Zealander': '🇳🇿',
+  Brazilian: '🇧🇷', Argentine: '🇦🇷', Austrian: '🇦🇹', American: '🇺🇸',
   Swiss: '🇨🇭',
 };
 
-function nationalityFlag(nat: string) {
-  return NATIONALITY_FLAG[nat] ?? '🏁';
+function teamColour(id: string) { return TEAM_COLOURS[id] ?? '#94a3b8'; }
+function natFlag(nat: string) { return NATIONALITY_FLAG[nat] ?? '🏁'; }
+
+// Short GP label from full race name
+function shortGP(raceName: string) {
+  return raceName
+    .replace(' Grand Prix', ' GP')
+    .replace('Emilia Romagna GP', 'Imola GP')
+    .replace('São Paulo GP', 'Brazil GP');
 }
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────
 
-type Tab = 'drivers' | 'constructors';
+type StandingsTab = 'drivers' | 'constructors';
 
 export default function StandingsScreen() {
   const safeAreaInsets = useSafeAreaInsets();
   const theme = useTheme();
+  const roundScrollRef = useRef<ScrollView>(null);
 
   const insets = {
     ...safeAreaInsets,
@@ -109,125 +110,223 @@ export default function StandingsScreen() {
   };
 
   const contentPlatformStyle = Platform.select({
-    android: {
-      paddingTop: insets.top,
-      paddingLeft: insets.left,
-      paddingRight: insets.right,
-      paddingBottom: insets.bottom,
-    },
-    ios: {
-      paddingTop: insets.top,
-      paddingLeft: insets.left,
-      paddingRight: insets.right,
-      paddingBottom: insets.bottom,
-    },
-    web: {
-      paddingTop: Spacing.five,
-      paddingBottom: Spacing.four,
-    },
+    android: { paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right, paddingBottom: insets.bottom },
+    ios: { paddingTop: insets.top, paddingLeft: insets.left, paddingRight: insets.right, paddingBottom: insets.bottom },
+    web: { paddingTop: Spacing.five, paddingBottom: Spacing.four },
   });
 
-  const [activeTab, setActiveTab] = useState<Tab>('drivers');
+  const [activeTab, setActiveTab] = useState<StandingsTab>('drivers');
 
-  // Driver standings
+  // All completed races for the season (round list)
+  const [races, setRaces] = useState<Race[]>([]);
+  const [racesLoading, setRacesLoading] = useState(true);
+
+  // Currently selected round (null = latest)
+  const [selectedRound, setSelectedRound] = useState<string | null>(null);
+
+  // Standings data for the selected round
   const [driverStandings, setDriverStandings] = useState<DriverStanding[]>([]);
-  const [driverLoading, setDriverLoading] = useState(true);
-  const [driverError, setDriverError] = useState<string | null>(null);
-  const [driverSeason, setDriverSeason] = useState<string>('2025');
-  const [driverRound, setDriverRound] = useState<string>('');
-
-  // Constructor standings
   const [constructorStandings, setConstructorStandings] = useState<ConstructorStanding[]>([]);
-  const [constructorLoading, setConstructorLoading] = useState(true);
-  const [constructorError, setConstructorError] = useState<string | null>(null);
-  const [constructorSeason, setConstructorSeason] = useState<string>('2025');
-  const [constructorRound, setConstructorRound] = useState<string>('');
+  const [standingsLoading, setStandingsLoading] = useState(false);
+  const [standingsError, setStandingsError] = useState<string | null>(null);
 
-  // Load on first focus
+  // Cache: round -> { drivers, constructors }
+  const cache = useRef<Record<string, { drivers: DriverStanding[]; constructors: ConstructorStanding[] }>>({});
+
+  // ── Fetch completed races (calendar) on first focus ───────────────────────
   useFocusEffect(
     useCallback(() => {
+      if (races.length > 0) return;
       let cancelled = false;
 
-      const loadAll = async () => {
-        // --- Driver standings ---
+      (async () => {
         try {
-          setDriverLoading(true);
-          setDriverError(null);
-          const res = await fetchWithRetry(
-            'https://api.jolpi.ca/ergast/f1/2025/driverstandings.json'
-          );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          setRacesLoading(true);
+          const res = await fetchWithRetry(`https://api.jolpi.ca/ergast/f1/${SEASON}.json`);
+          if (!res.ok) throw new Error('Race list failed');
           const json = await res.json();
           if (cancelled) return;
-          const list = json?.MRData?.StandingsTable?.StandingsLists?.[0];
-          if (list) {
-            setDriverStandings(list.DriverStandings ?? []);
-            setDriverSeason(list.season ?? '2025');
-            setDriverRound(list.round ?? '');
+
+          const allRaces: Race[] = json?.MRData?.RaceTable?.Races ?? [];
+          const now = new Date();
+          // Only keep completed races
+          const completed = allRaces.filter(r => new Date(r.date) < now);
+          setRaces(completed);
+
+          // Default: latest completed round
+          if (completed.length > 0 && !selectedRound) {
+            setSelectedRound(completed[completed.length - 1].round);
           }
-        } catch (err) {
-          if (!cancelled) setDriverError('Failed to load driver standings.');
+        } catch {
+          // silently fail — standings will show error
         } finally {
-          if (!cancelled) setDriverLoading(false);
+          if (!cancelled) setRacesLoading(false);
         }
+      })();
 
-        // --- Constructor standings ---
-        try {
-          setConstructorLoading(true);
-          setConstructorError(null);
-          const res = await fetchWithRetry(
-            'https://api.jolpi.ca/ergast/f1/2025/constructorstandings.json'
-          );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const json = await res.json();
-          if (cancelled) return;
-          const list = json?.MRData?.StandingsTable?.StandingsLists?.[0];
-          if (list) {
-            setConstructorStandings(list.ConstructorStandings ?? []);
-            setConstructorSeason(list.season ?? '2025');
-            setConstructorRound(list.round ?? '');
-          }
-        } catch (err) {
-          if (!cancelled) setConstructorError('Failed to load constructor standings.');
-        } finally {
-          if (!cancelled) setConstructorLoading(false);
-        }
-      };
-
-      // Only fetch if not already loaded
-      if (driverStandings.length === 0 || constructorStandings.length === 0) {
-        loadAll();
-      }
-
-      return () => {
-        cancelled = true;
-      };
+      return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [driverStandings.length, constructorStandings.length])
+    }, [races.length])
   );
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
+  // ── Fetch standings when selectedRound changes ────────────────────────────
+  useEffect(() => {
+    if (!selectedRound) return;
 
-  const getLeaderPoints = () => {
-    if (activeTab === 'drivers' && driverStandings.length > 0) {
-      return parseInt(driverStandings[0].points, 10);
+    // Return cached data immediately
+    if (cache.current[selectedRound]) {
+      const cached = cache.current[selectedRound];
+      setDriverStandings(cached.drivers);
+      setConstructorStandings(cached.constructors);
+      return;
     }
-    if (activeTab === 'constructors' && constructorStandings.length > 0) {
-      return parseInt(constructorStandings[0].points, 10);
-    }
-    return 1;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setStandingsLoading(true);
+        setStandingsError(null);
+
+        const [drRes, conRes] = await Promise.all([
+          fetchWithRetry(`https://api.jolpi.ca/ergast/f1/${SEASON}/${selectedRound}/driverstandings.json`),
+          fetchWithRetry(`https://api.jolpi.ca/ergast/f1/${SEASON}/${selectedRound}/constructorstandings.json`),
+        ]);
+
+        if (!drRes.ok || !conRes.ok) throw new Error('Fetch failed');
+
+        const [drJson, conJson] = await Promise.all([drRes.json(), conRes.json()]);
+        if (cancelled) return;
+
+        const drivers: DriverStanding[] =
+          drJson?.MRData?.StandingsTable?.StandingsLists?.[0]?.DriverStandings ?? [];
+        const constructors: ConstructorStanding[] =
+          conJson?.MRData?.StandingsTable?.StandingsLists?.[0]?.ConstructorStandings ?? [];
+
+        cache.current[selectedRound] = { drivers, constructors };
+        setDriverStandings(drivers);
+        setConstructorStandings(constructors);
+      } catch {
+        if (!cancelled) setStandingsError('Could not load standings for this round.');
+      } finally {
+        if (!cancelled) setStandingsLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [selectedRound]);
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const activeList = activeTab === 'drivers' ? driverStandings : constructorStandings;
+  const leaderPts = activeList.length > 0 ? parseInt(activeList[0].points, 10) : 1;
+
+  const selectedRace = races.find(r => r.round === selectedRound);
+  const isLatest = selectedRound === races[races.length - 1]?.round;
+
+  // ── Round navigation helpers ──────────────────────────────────────────────
+  const goToPrevRound = () => {
+    if (!selectedRound || races.length === 0) return;
+    const idx = races.findIndex(r => r.round === selectedRound);
+    if (idx > 0) setSelectedRound(races[idx - 1].round);
   };
 
-  // ─── Render helpers ────────────────────────────────────────────────────────
+  const goToNextRound = () => {
+    if (!selectedRound || races.length === 0) return;
+    const idx = races.findIndex(r => r.round === selectedRound);
+    if (idx < races.length - 1) setSelectedRound(races[idx + 1].round);
+  };
 
+  const isFirstRound = selectedRound === races[0]?.round;
+  const isLastRound = selectedRound === races[races.length - 1]?.round;
+
+  // ── Render: round pill strip ──────────────────────────────────────────────
+  const renderRoundStrip = () => (
+    <View style={styles.roundStripWrapper}>
+      {/* Prev button */}
+      <Pressable
+        onPress={goToPrevRound}
+        disabled={isFirstRound}
+        style={({ pressed }) => [
+          styles.arrowBtn,
+          { backgroundColor: theme.backgroundElement, opacity: isFirstRound ? 0.3 : pressed ? 0.6 : 1 },
+        ]}
+      >
+        <SymbolView
+          name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
+          size={14}
+          tintColor={theme.text}
+        />
+      </Pressable>
+
+      {/* Scrollable pill strip */}
+      <ScrollView
+        ref={roundScrollRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.roundScroll}
+        contentContainerStyle={styles.roundScrollContent}
+      >
+        {races.map((race) => {
+          const isSelected = race.round === selectedRound;
+          const colour = isSelected ? theme.cosmicIndigo : theme.backgroundElement;
+          return (
+            <Pressable
+              key={race.round}
+              onPress={() => setSelectedRound(race.round)}
+              style={({ pressed }) => [
+                styles.roundPill,
+                {
+                  backgroundColor: isSelected ? theme.cosmicIndigo : theme.backgroundElement,
+                  borderColor: isSelected ? theme.cosmicIndigo : 'transparent',
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <ThemedText
+                type="code"
+                style={[styles.roundPillNum, { color: isSelected ? '#fff' : theme.textSecondary }]}
+              >
+                R{race.round}
+              </ThemedText>
+              <ThemedText
+                type="code"
+                style={[styles.roundPillName, { color: isSelected ? '#fff' : theme.textSecondary }]}
+                numberOfLines={1}
+              >
+                {shortGP(race.raceName)}
+              </ThemedText>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
+      {/* Next button */}
+      <Pressable
+        onPress={goToNextRound}
+        disabled={isLastRound}
+        style={({ pressed }) => [
+          styles.arrowBtn,
+          { backgroundColor: theme.backgroundElement, opacity: isLastRound ? 0.3 : pressed ? 0.6 : 1 },
+        ]}
+      >
+        <SymbolView
+          name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+          size={14}
+          tintColor={theme.text}
+        />
+      </Pressable>
+    </View>
+  );
+
+  // ── Render: driver row ────────────────────────────────────────────────────
   const renderDriverRow = (entry: DriverStanding, idx: number) => {
     const pos = parseInt(entry.position, 10);
     const pts = parseInt(entry.points, 10);
-    const leaderPts = getLeaderPoints();
     const barWidth = leaderPts > 0 ? Math.max(4, (pts / leaderPts) * 100) : 4;
     const constructorId = entry.Constructors[0]?.constructorId ?? '';
     const colour = teamColour(constructorId);
-    const flag = nationalityFlag(entry.Driver.nationality);
+    const flag = natFlag(entry.Driver.nationality);
     const isTop3 = pos <= 3;
     const gap = pos === 1 ? null : leaderPts - pts;
 
@@ -241,52 +340,27 @@ export default function StandingsScreen() {
             borderColor: isTop3 ? colour : theme.backgroundElement,
             borderWidth: isTop3 ? 1.5 : 1,
           },
-          idx === 0 && styles.standingRowFirst,
         ]}
       >
-        {/* Top accent for leader */}
-        {pos === 1 && (
-          <View style={[styles.leaderAccent, { backgroundColor: colour }]} />
-        )}
+        {pos === 1 && <View style={[styles.leaderAccent, { backgroundColor: colour }]} />}
 
         <View style={styles.rowMain}>
-          {/* Position badge */}
-          <View
-            style={[
-              styles.posBadge,
-              {
-                backgroundColor: isTop3 ? colour : theme.backgroundElement,
-              },
-            ]}
-          >
-            {pos === 1 && (
-              <ThemedText style={[styles.posTrophy]}>🏆</ThemedText>
-            )}
-            {pos !== 1 && (
-              <ThemedText
-                type="code"
-                style={[
-                  styles.posText,
-                  { color: isTop3 ? '#000' : theme.textSecondary },
-                ]}
-              >
-                {entry.position}
-              </ThemedText>
-            )}
+          {/* Pos badge */}
+          <View style={[styles.posBadge, { backgroundColor: isTop3 ? colour : theme.backgroundElement }]}>
+            {pos === 1
+              ? <ThemedText style={styles.posTrophy}>🏆</ThemedText>
+              : <ThemedText type="code" style={[styles.posText, { color: isTop3 ? '#000' : theme.textSecondary }]}>{entry.position}</ThemedText>
+            }
           </View>
 
           {/* Driver info */}
           <View style={styles.driverInfo}>
             <View style={styles.driverNameRow}>
-              <View
-                style={[styles.teamDot, { backgroundColor: colour }]}
-              />
+              <View style={[styles.teamDot, { backgroundColor: colour }]} />
               <ThemedText type="smallBold" style={styles.driverCode} themeColor="text">
                 {entry.Driver.code}
               </ThemedText>
-              <ThemedText type="code" style={styles.driverFlag}>
-                {flag}
-              </ThemedText>
+              <ThemedText type="code" style={styles.driverFlag}>{flag}</ThemedText>
             </View>
             <ThemedText type="code" style={styles.driverFullName} themeColor="textSecondary" numberOfLines={1}>
               {entry.Driver.givenName} {entry.Driver.familyName}
@@ -301,20 +375,14 @@ export default function StandingsScreen() {
             <ThemedText type="smallBold" style={[styles.pointsText, { color: isTop3 ? colour : theme.text }]}>
               {entry.points}
             </ThemedText>
-            <ThemedText type="code" style={styles.ptsLabel} themeColor="textSecondary">
-              PTS
-            </ThemedText>
+            <ThemedText type="code" style={styles.ptsLabel} themeColor="textSecondary">PTS</ThemedText>
             {entry.wins !== '0' && (
               <View style={[styles.winsBadge, { backgroundColor: `${colour}22`, borderColor: colour }]}>
-                <ThemedText type="code" style={[styles.winsText, { color: colour }]}>
-                  {entry.wins}W
-                </ThemedText>
+                <ThemedText type="code" style={[styles.winsText, { color: colour }]}>{entry.wins}W</ThemedText>
               </View>
             )}
             {gap !== null && (
-              <ThemedText type="code" style={styles.gapText} themeColor="textSecondary">
-                -{gap}
-              </ThemedText>
+              <ThemedText type="code" style={styles.gapText} themeColor="textSecondary">-{gap}</ThemedText>
             )}
           </View>
         </View>
@@ -329,11 +397,7 @@ export default function StandingsScreen() {
                 width: `${barWidth}%` as any,
                 ...Platform.select({
                   web: { boxShadow: isTop3 ? `0 0 8px ${colour}` : 'none' },
-                  default: {
-                    shadowColor: colour,
-                    shadowOpacity: isTop3 ? 0.5 : 0,
-                    shadowRadius: 4,
-                  },
+                  default: { shadowColor: colour, shadowOpacity: isTop3 ? 0.5 : 0, shadowRadius: 4 },
                 }),
               },
             ]}
@@ -343,13 +407,13 @@ export default function StandingsScreen() {
     );
   };
 
+  // ── Render: constructor row ───────────────────────────────────────────────
   const renderConstructorRow = (entry: ConstructorStanding, idx: number) => {
     const pos = parseInt(entry.position, 10);
     const pts = parseInt(entry.points, 10);
-    const leaderPts = getLeaderPoints();
     const barWidth = leaderPts > 0 ? Math.max(4, (pts / leaderPts) * 100) : 4;
     const colour = teamColour(entry.Constructor.constructorId);
-    const flag = nationalityFlag(entry.Constructor.nationality);
+    const flag = natFlag(entry.Constructor.nationality);
     const isTop3 = pos <= 3;
     const gap = pos === 1 ? null : leaderPts - pts;
 
@@ -363,77 +427,47 @@ export default function StandingsScreen() {
             borderColor: isTop3 ? colour : theme.backgroundElement,
             borderWidth: isTop3 ? 1.5 : 1,
           },
-          idx === 0 && styles.standingRowFirst,
         ]}
       >
-        {pos === 1 && (
-          <View style={[styles.leaderAccent, { backgroundColor: colour }]} />
-        )}
+        {pos === 1 && <View style={[styles.leaderAccent, { backgroundColor: colour }]} />}
 
         <View style={styles.rowMain}>
-          {/* Position badge */}
-          <View
-            style={[
-              styles.posBadge,
-              { backgroundColor: isTop3 ? colour : theme.backgroundElement },
-            ]}
-          >
-            {pos === 1 && (
-              <ThemedText style={[styles.posTrophy]}>🏆</ThemedText>
-            )}
-            {pos !== 1 && (
-              <ThemedText
-                type="code"
-                style={[
-                  styles.posText,
-                  { color: isTop3 ? '#000' : theme.textSecondary },
-                ]}
-              >
-                {entry.position}
-              </ThemedText>
-            )}
+          <View style={[styles.posBadge, { backgroundColor: isTop3 ? colour : theme.backgroundElement }]}>
+            {pos === 1
+              ? <ThemedText style={styles.posTrophy}>🏆</ThemedText>
+              : <ThemedText type="code" style={[styles.posText, { color: isTop3 ? '#000' : theme.textSecondary }]}>{entry.position}</ThemedText>
+            }
           </View>
 
-          {/* Constructor info */}
           <View style={styles.driverInfo}>
             <View style={styles.driverNameRow}>
               <View style={[styles.teamDot, { backgroundColor: colour }]} />
               <ThemedText type="smallBold" style={styles.driverCode} themeColor="text">
                 {entry.Constructor.name}
               </ThemedText>
-              <ThemedText type="code" style={styles.driverFlag}>
-                {flag}
-              </ThemedText>
+              <ThemedText type="code" style={styles.driverFlag}>{flag}</ThemedText>
             </View>
             <ThemedText type="code" style={styles.teamName} themeColor="textSecondary">
               {entry.Constructor.nationality}
             </ThemedText>
           </View>
 
-          {/* Stats */}
           <View style={styles.statsCol}>
             <ThemedText type="smallBold" style={[styles.pointsText, { color: isTop3 ? colour : theme.text }]}>
               {entry.points}
             </ThemedText>
-            <ThemedText type="code" style={styles.ptsLabel} themeColor="textSecondary">
-              PTS
-            </ThemedText>
+            <ThemedText type="code" style={styles.ptsLabel} themeColor="textSecondary">PTS</ThemedText>
             {entry.wins !== '0' && (
               <View style={[styles.winsBadge, { backgroundColor: `${colour}22`, borderColor: colour }]}>
-                <ThemedText type="code" style={[styles.winsText, { color: colour }]}>
-                  {entry.wins}W
-                </ThemedText>
+                <ThemedText type="code" style={[styles.winsText, { color: colour }]}>{entry.wins}W</ThemedText>
               </View>
             )}
             {gap !== null && (
-              <ThemedText type="code" style={styles.gapText} themeColor="textSecondary">
-                -{gap}
-              </ThemedText>
+              <ThemedText type="code" style={styles.gapText} themeColor="textSecondary">-{gap}</ThemedText>
             )}
           </View>
         </View>
 
-        {/* Points bar */}
         <View style={[styles.barTrack, { backgroundColor: theme.backgroundElement }]}>
           <View
             style={[
@@ -443,11 +477,7 @@ export default function StandingsScreen() {
                 width: `${barWidth}%` as any,
                 ...Platform.select({
                   web: { boxShadow: isTop3 ? `0 0 8px ${colour}` : 'none' },
-                  default: {
-                    shadowColor: colour,
-                    shadowOpacity: isTop3 ? 0.5 : 0,
-                    shadowRadius: 4,
-                  },
+                  default: { shadowColor: colour, shadowOpacity: isTop3 ? 0.5 : 0, shadowRadius: 4 },
                 }),
               },
             ]}
@@ -457,10 +487,7 @@ export default function StandingsScreen() {
     );
   };
 
-  const isLoading = activeTab === 'drivers' ? driverLoading : constructorLoading;
-  const hasError = activeTab === 'drivers' ? driverError : constructorError;
-  const season = activeTab === 'drivers' ? driverSeason : constructorSeason;
-  const round = activeTab === 'drivers' ? driverRound : constructorRound;
+  // ── Main render ───────────────────────────────────────────────────────────
 
   return (
     <ScrollView
@@ -473,15 +500,49 @@ export default function StandingsScreen() {
         {/* ── HEADER ── */}
         <ThemedView style={styles.titleContainer}>
           <View style={styles.accentBar} />
-          <ThemedText type="subtitle" style={styles.titleText}>
-            CHAMPIONSHIP STANDINGS
-          </ThemedText>
-          <ThemedText style={styles.subtitleText} themeColor="textSecondary">
-            {season} Season · After Round {round}
-          </ThemedText>
+          <View style={styles.headerRow}>
+            <View style={styles.headerTitles}>
+              <ThemedText type="subtitle" style={styles.titleText}>
+                CHAMPIONSHIP STANDINGS
+              </ThemedText>
+              <ThemedText style={styles.subtitleText} themeColor="textSecondary">
+                {SEASON} Season
+                {selectedRace
+                  ? ` · R${selectedRace.round} — ${shortGP(selectedRace.raceName)}`
+                  : ''}
+                {isLatest && <ThemedText style={{ color: theme.neonTeal }}> · CURRENT</ThemedText>}
+              </ThemedText>
+            </View>
+
+            {/* Latest shortcut */}
+            {!isLatest && races.length > 0 && (
+              <Pressable
+                onPress={() => setSelectedRound(races[races.length - 1].round)}
+                style={({ pressed }) => [
+                  styles.latestBtn,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.neonTeal },
+                  pressed && { opacity: 0.7 },
+                ]}
+              >
+                <ThemedText type="code" style={[styles.latestBtnText, { color: theme.neonTeal }]}>
+                  LATEST
+                </ThemedText>
+              </Pressable>
+            )}
+          </View>
         </ThemedView>
 
-        {/* ── TAB SWITCHER ── */}
+        {/* ── ROUND SELECTOR ── */}
+        {racesLoading ? (
+          <View style={styles.roundLoadingRow}>
+            <ActivityIndicator size="small" color={theme.cosmicIndigo} />
+            <ThemedText type="code" themeColor="textSecondary">Loading race calendar…</ThemedText>
+          </View>
+        ) : races.length > 0 ? (
+          renderRoundStrip()
+        ) : null}
+
+        {/* ── DRIVER / CONSTRUCTOR TAB SWITCHER ── */}
         <View style={[styles.tabSwitcher, { backgroundColor: theme.backgroundElement }]}>
           <Pressable
             onPress={() => setActiveTab('drivers')}
@@ -498,10 +559,7 @@ export default function StandingsScreen() {
             />
             <ThemedText
               type="code"
-              style={[
-                styles.tabLabel,
-                { color: activeTab === 'drivers' ? theme.cosmicIndigo : theme.textSecondary },
-              ]}
+              style={[styles.tabLabel, { color: activeTab === 'drivers' ? theme.cosmicIndigo : theme.textSecondary }]}
             >
               DRIVERS
             </ThemedText>
@@ -522,25 +580,22 @@ export default function StandingsScreen() {
             />
             <ThemedText
               type="code"
-              style={[
-                styles.tabLabel,
-                { color: activeTab === 'constructors' ? theme.cosmicIndigo : theme.textSecondary },
-              ]}
+              style={[styles.tabLabel, { color: activeTab === 'constructors' ? theme.cosmicIndigo : theme.textSecondary }]}
             >
               CONSTRUCTORS
             </ThemedText>
           </Pressable>
         </View>
 
-        {/* ── CONTENT ── */}
-        {isLoading ? (
+        {/* ── STANDINGS LIST ── */}
+        {standingsLoading ? (
           <View style={styles.loadingWrapper}>
             <ActivityIndicator size="large" color={theme.cosmicIndigo} />
             <ThemedText type="code" themeColor="textSecondary">
-              Loading {activeTab === 'drivers' ? 'driver' : 'constructor'} standings…
+              Loading standings…
             </ThemedText>
           </View>
-        ) : hasError ? (
+        ) : standingsError ? (
           <View style={styles.errorWrapper}>
             <SymbolView
               name={{ ios: 'exclamationmark.triangle.fill', android: 'warning', web: 'warning' }}
@@ -548,7 +603,7 @@ export default function StandingsScreen() {
               tintColor={theme.solarAmber}
             />
             <ThemedText type="code" themeColor="textSecondary" style={styles.errorText}>
-              {hasError}
+              {standingsError}
             </ThemedText>
           </View>
         ) : (
@@ -568,13 +623,8 @@ export default function StandingsScreen() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  scrollView: {
-    flex: 1,
-  },
-  contentContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-  },
+  scrollView: { flex: 1 },
+  contentContainer: { flexDirection: 'row', justifyContent: 'center' },
   container: {
     maxWidth: MaxContentWidth,
     flexGrow: 1,
@@ -596,15 +646,76 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff1801',
     marginBottom: 2,
   },
-  titleText: {
-    fontWeight: 'bold',
-    letterSpacing: 2,
-    fontSize: 20,
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+    flexWrap: 'wrap',
   },
-  subtitleText: {
-    fontSize: 12,
-    lineHeight: 18,
-    letterSpacing: 0.3,
+  headerTitles: { flex: 1, gap: Spacing.one, minWidth: 200 },
+  titleText: { fontWeight: 'bold', letterSpacing: 2, fontSize: 20 },
+  subtitleText: { fontSize: 12, lineHeight: 18, letterSpacing: 0.3 },
+
+  // Latest button
+  latestBtn: {
+    borderRadius: 20,
+    borderWidth: 1.5,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    flexShrink: 0,
+  },
+  latestBtnText: {
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+
+  // ── Round strip
+  roundLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.two,
+  },
+  roundStripWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  arrowBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  roundScroll: { flex: 1 },
+  roundScrollContent: {
+    flexDirection: 'row',
+    gap: Spacing.one,
+    paddingVertical: 2,
+  },
+  roundPill: {
+    borderRadius: 10,
+    borderWidth: 1.5,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 5,
+    alignItems: 'center',
+    minWidth: 72,
+  },
+  roundPillNum: {
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+    lineHeight: 12,
+  },
+  roundPillName: {
+    fontSize: 9,
+    letterSpacing: 0.2,
+    lineHeight: 12,
+    textAlign: 'center',
   },
 
   // ── Tab switcher
@@ -627,55 +738,27 @@ const styles = StyleSheet.create({
   tabBtnActive: {
     ...cardShadow({ opacity: 0.15, radius: 8, offsetY: 2, elevation: 2 }),
   },
-  tabLabel: {
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 0.8,
-  },
+  tabLabel: { fontSize: 11, fontWeight: 'bold', letterSpacing: 0.8 },
 
   // ── Loading / Error
-  loadingWrapper: {
-    paddingVertical: Spacing.six,
-    alignItems: 'center',
-    gap: Spacing.three,
-  },
-  errorWrapper: {
-    paddingVertical: Spacing.six,
-    alignItems: 'center',
-    gap: Spacing.three,
-  },
-  errorText: {
-    textAlign: 'center',
-    lineHeight: 20,
-  },
+  loadingWrapper: { paddingVertical: Spacing.six, alignItems: 'center', gap: Spacing.three },
+  errorWrapper: { paddingVertical: Spacing.six, alignItems: 'center', gap: Spacing.three },
+  errorText: { textAlign: 'center', lineHeight: 20 },
 
-  // ── List
-  listContainer: {
-    gap: Spacing.two,
-    paddingBottom: Spacing.four,
-  },
-
-  // ── Standing row card
+  // ── Standing rows
+  listContainer: { gap: Spacing.two, paddingBottom: Spacing.four },
   standingRow: {
     borderRadius: 12,
     overflow: 'hidden',
     ...cardShadow({ opacity: 0.15, radius: 10, offsetY: 4, elevation: 2 }),
   },
-  standingRowFirst: {
-    // Extra visual weight for first place is already applied per-row
-  },
-  leaderAccent: {
-    height: 3,
-    width: '100%',
-  },
+  leaderAccent: { height: 3, width: '100%' },
   rowMain: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: Spacing.three,
     gap: Spacing.two,
   },
-
-  // Position badge
   posBadge: {
     width: 36,
     height: 36,
@@ -684,93 +767,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexShrink: 0,
   },
-  posText: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  posTrophy: {
-    fontSize: 18,
-  },
-
-  // Driver / Team info block
-  driverInfo: {
-    flex: 1,
-    gap: 2,
-    minWidth: 0,
-  },
-  driverNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flexWrap: 'wrap',
-  },
-  teamDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  driverCode: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  driverFlag: {
-    fontSize: 14,
-  },
-  driverFullName: {
-    fontSize: 10,
-    letterSpacing: 0.3,
-  },
-  teamName: {
-    fontSize: 10,
-    letterSpacing: 0.2,
-  },
-
-  // Stats column
-  statsCol: {
-    alignItems: 'flex-end',
-    gap: 2,
-    flexShrink: 0,
-  },
-  pointsText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-    lineHeight: 22,
-  },
-  ptsLabel: {
-    fontSize: 9,
-    letterSpacing: 1.5,
-    fontWeight: 'bold',
-    marginTop: -2,
-  },
-  winsBadge: {
-    borderRadius: 4,
-    borderWidth: 1,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    marginTop: 2,
-  },
-  winsText: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  gapText: {
-    fontSize: 9,
-    letterSpacing: 0.3,
-    marginTop: 1,
-  },
-
-  // Points bar
-  barTrack: {
-    height: 3,
-    width: '100%',
-    borderRadius: 0,
-  },
-  barFill: {
-    height: 3,
-    borderRadius: 0,
-  },
+  posText: { fontSize: 14, fontWeight: 'bold', letterSpacing: 0.5 },
+  posTrophy: { fontSize: 18 },
+  driverInfo: { flex: 1, gap: 2, minWidth: 0 },
+  driverNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  teamDot: { width: 8, height: 8, borderRadius: 4 },
+  driverCode: { fontSize: 14, fontWeight: 'bold', letterSpacing: 1 },
+  driverFlag: { fontSize: 14 },
+  driverFullName: { fontSize: 10, letterSpacing: 0.3 },
+  teamName: { fontSize: 10, letterSpacing: 0.2 },
+  statsCol: { alignItems: 'flex-end', gap: 2, flexShrink: 0 },
+  pointsText: { fontSize: 20, fontWeight: 'bold', letterSpacing: 0.5, lineHeight: 22 },
+  ptsLabel: { fontSize: 9, letterSpacing: 1.5, fontWeight: 'bold', marginTop: -2 },
+  winsBadge: { borderRadius: 4, borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1, marginTop: 2 },
+  winsText: { fontSize: 9, fontWeight: 'bold', letterSpacing: 0.5 },
+  gapText: { fontSize: 9, letterSpacing: 0.3, marginTop: 1 },
+  barTrack: { height: 3, width: '100%', borderRadius: 0 },
+  barFill: { height: 3, borderRadius: 0 },
 });
