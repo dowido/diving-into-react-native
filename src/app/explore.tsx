@@ -1,108 +1,59 @@
-import React from 'react';
-import { Platform, ScrollView, StyleSheet, View } from 'react-native';
+import { SymbolView } from 'expo-symbols';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { GravitySimulator } from '@/components/gravity-simulator';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Collapsible } from '@/components/ui/collapsible';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
-// Planetary Database
-const PLANETS = [
-  {
-    name: 'Mercury',
-    symbol: 'sun.max.fill',
-    gravityRatio: 0.38,
-    distance: '57.9M km',
-    dayLength: '59 Earth days',
-    yearLength: '88 Earth days',
-    moons: 0,
-    funFact: 'Like a trampoline. You could leap almost 3 times higher on Mercury than on Earth!',
-    info: 'The smallest planet in our solar system and nearest to the Sun, Mercury is only slightly larger than Earth\'s Moon. It has no atmosphere, leading to extreme temperature swings.',
-    accentColor: '#94a3b8'
-  },
-  {
-    name: 'Venus',
-    symbol: 'sparkles',
-    gravityRatio: 0.91,
-    distance: '108.2M km',
-    dayLength: '243 Earth days',
-    yearLength: '225 Earth days',
-    moons: 0,
-    funFact: 'Slightly lighter than Earth, but the crushing CO2 atmosphere would feel like diving 1km deep in water!',
-    info: 'Venus is our closest planetary neighbor. Its thick, toxic atmosphere traps heat in a runaway greenhouse effect, making it the hottest planet in our solar system.',
-    accentColor: '#fbbf24'
-  },
-  {
-    name: 'Mars',
-    symbol: 'flame.fill',
-    gravityRatio: 0.38,
-    distance: '227.9M km',
-    dayLength: '24.6 hours',
-    yearLength: '687 Earth days',
-    moons: 2,
-    funFact: 'You\'d feel extremely light and active. A 150lb person weighs only 57lbs here!',
-    info: 'Mars is a cold, dusty desert world with a thin atmosphere. There is strong scientific evidence that Mars was billions of years ago much wetter and warmer with a thicker atmosphere.',
-    accentColor: '#f87171'
-  },
-  {
-    name: 'Jupiter',
-    symbol: 'hurricane',
-    gravityRatio: 2.53,
-    distance: '778.5M km',
-    dayLength: '9.9 hours',
-    yearLength: '12 Earth years',
-    moons: 95,
-    funFact: 'Extremely heavy! You would feel like you\'re carrying two adults on your back, making movement very difficult.',
-    info: 'Jupiter is the largest planet in our solar system—more than twice as massive as all the other planets combined. Its iconic Great Red Spot is a giant storm bigger than Earth.',
-    accentColor: '#fb923c'
-  },
-  {
-    name: 'Saturn',
-    symbol: 'circle.grid.cross.fill',
-    gravityRatio: 1.06,
-    distance: '1.4B km',
-    dayLength: '10.7 hours',
-    yearLength: '29 Earth years',
-    moons: 146,
-    funFact: 'Almost identical to Earth weight, but Saturn is so light and gas-heavy that it could float in a giant bathtub!',
-    info: 'Adorned with thousands of beautiful, icy ringlets, Saturn is unique in our solar system. It is a massive gas giant made mostly of hydrogen and helium.',
-    accentColor: '#fef08a'
-  },
-  {
-    name: 'Uranus',
-    symbol: 'wind',
-    gravityRatio: 0.92,
-    distance: '2.9B km',
-    dayLength: '17.2 hours',
-    yearLength: '84 Earth years',
-    moons: 28,
-    funFact: 'Slightly less gravity than Earth, but you\'d be floating in a freezing ice-giant atmosphere.',
-    info: 'Uranus is the seventh planet from the Sun. It rotates on its side at an nearly 90-degree angle from the plane of its orbit, making it look like a rolling ball.',
-    accentColor: '#2dd4bf'
-  },
-  {
-    name: 'Neptune',
-    symbol: 'drop.fill',
-    gravityRatio: 1.12,
-    distance: '4.5B km',
-    dayLength: '16.1 hours',
-    yearLength: '165 Earth years',
-    moons: 16,
-    funFact: 'Slightly heavier than Earth, and you\'d have to battle supersonic winds reaching up to 2,100 km/h!',
-    info: 'Neptune is the eighth and most distant major planet orbiting our Sun. It is dark, cold, and whipped by supersonic winds, and was the first planet located through mathematical calculations.',
-    accentColor: '#60a5fa'
-  }
-];
+interface Session {
+  session_key: number;
+  session_type: string;
+  session_name: string;
+  date_start: string;
+  date_end: string;
+  meeting_key: number;
+  circuit_key: number;
+  circuit_short_name: string;
+  country_name: string;
+  location: string;
+  year: number;
+  gmt_offset?: string;
+}
 
-export default function TabTwoScreen() {
+interface GroupedMeeting {
+  meeting_key: number;
+  circuit_short_name: string;
+  country_name: string;
+  location: string;
+  gmt_offset?: string;
+  sessions: Session[];
+}
+
+interface ResultEntry {
+  position: number | null;
+  driver_number: number;
+  number_of_laps: number;
+  points: number;
+  dnf: boolean;
+  dns: boolean;
+  gap_to_leader: number | string | null;
+  duration: number | null;
+  driver?: {
+    full_name: string;
+    name_acronym: string;
+    team_name: string;
+    team_colour: string;
+  };
+}
+
+export default function ExploreSessionsScreen() {
   const safeAreaInsets = useSafeAreaInsets();
   const theme = useTheme();
 
-  // Insets configuration for screen scrolling
   const insets = {
     ...safeAreaInsets,
     bottom: safeAreaInsets.bottom + BottomTabInset + Spacing.three,
@@ -127,6 +78,246 @@ export default function TabTwoScreen() {
     },
   });
 
+  const [loading, setLoading] = useState(true);
+  const [meetings, setMeetings] = useState<GroupedMeeting[]>([]);
+  const [selectedMeetingKey, setSelectedMeetingKey] = useState<number | null>(null);
+  const [selectedSessionKey, setSelectedSessionKey] = useState<number | null>(null);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [sessionResults, setSessionResults] = useState<ResultEntry[]>([]);
+
+  // Timezone toggle state
+  const [useLocalTime, setUseLocalTime] = useState(true);
+
+  // Mobile modal state
+  const [modalVisible, setModalVisible] = useState(false);
+
+  useEffect(() => {
+    const fetchSessions = async () => {
+      try {
+        setLoading(true);
+        const res = await fetch('https://api.openf1.org/v1/sessions?year=2026');
+        if (!res.ok) throw new Error('Failed to fetch sessions');
+        const data: Session[] = await res.json();
+
+        if (data && data.length > 0) {
+          const meetingsMap = new Map<number, GroupedMeeting>();
+          data.forEach((s) => {
+            const existing = meetingsMap.get(s.meeting_key);
+            if (existing) {
+              existing.sessions.push(s);
+            } else {
+              meetingsMap.set(s.meeting_key, {
+                meeting_key: s.meeting_key,
+                circuit_short_name: s.circuit_short_name,
+                country_name: s.country_name,
+                location: s.location,
+                gmt_offset: s.gmt_offset,
+                sessions: [s],
+              });
+            }
+          });
+
+          const sortedMeetings = Array.from(meetingsMap.values()).sort((a, b) => {
+            const aDate = new Date(a.sessions[0].date_start).getTime();
+            const bDate = new Date(b.sessions[0].date_start).getTime();
+            return bDate - aDate;
+          });
+
+          sortedMeetings.forEach((m) => {
+            m.sessions.sort((a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime());
+          });
+
+          setMeetings(sortedMeetings);
+
+          if (sortedMeetings.length > 0) {
+            setSelectedMeetingKey(sortedMeetings[0].meeting_key);
+            if (sortedMeetings[0].sessions.length > 0) {
+              setSelectedSessionKey(sortedMeetings[0].sessions[0].session_key);
+            }
+          }
+        }
+        setLoading(false);
+      } catch (err) {
+        console.warn('Error fetching sessions:', err);
+        setLoading(false);
+      }
+    };
+
+    fetchSessions();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSessionKey) return;
+
+    let active = true;
+    const fetchResults = async () => {
+      try {
+        setResultsLoading(true);
+        const resultsRes = await fetch(
+          `https://api.openf1.org/v1/session_result?session_key=${selectedSessionKey}`
+        );
+        if (!resultsRes.ok) throw new Error('Results fetch failed');
+        const results: ResultEntry[] = await resultsRes.json();
+
+        const driversRes = await fetch(
+          `https://api.openf1.org/v1/drivers?session_key=${selectedSessionKey}`
+        );
+        if (!driversRes.ok) throw new Error('Drivers fetch failed');
+        const drivers = await driversRes.json();
+        const driversMap = new Map<number, any>();
+        drivers.forEach((d: any) => driversMap.set(d.driver_number, d));
+
+        if (!active) return;
+
+        if (results && results.length > 0) {
+          const enrichedResults = results.map((entry) => ({
+            ...entry,
+            driver: driversMap.get(entry.driver_number),
+          }));
+
+          enrichedResults.sort((a, b) => {
+            if (a.position === null) return 1;
+            if (b.position === null) return -1;
+            return a.position - b.position;
+          });
+
+          setSessionResults(enrichedResults);
+        } else {
+          setSessionResults([]);
+        }
+        setResultsLoading(false);
+      } catch (err) {
+        console.warn('Error fetching results:', err);
+        if (active) {
+          setSessionResults([]);
+          setResultsLoading(false);
+        }
+      }
+    };
+
+    fetchResults();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedSessionKey]);
+
+  const selectedMeeting = meetings.find((m) => m.meeting_key === selectedMeetingKey);
+  const selectedSession = selectedMeeting?.sessions.find((s) => s.session_key === selectedSessionKey);
+
+  const formatLapTime = (time: number | null) => {
+    if (!time) return '--:--';
+    const mins = Math.floor(time / 60);
+    const secs = (time % 60).toFixed(3);
+    if (mins > 0) {
+      return `${mins}:${secs.padStart(6, '0')}`;
+    }
+    return secs;
+  };
+
+  const formatTime = (dateStr: string, gmtOffsetStr?: string) => {
+    const date = new Date(dateStr);
+    if (useLocalTime) {
+      return date.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } else {
+      const offset = gmtOffsetStr || '00:00:00';
+      const parts = offset.split(':');
+      const offsetMs = (parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + (parseInt(parts[2]) || 0)) * 1000;
+      const trackDate = new Date(date.getTime() + offsetMs);
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const month = months[trackDate.getUTCMonth()];
+      const day = trackDate.getUTCDate();
+      const hours = trackDate.getUTCHours().toString().padStart(2, '0');
+      const minutes = trackDate.getUTCMinutes().toString().padStart(2, '0');
+      return `${month} ${day}, ${hours}:${minutes}`;
+    }
+  };
+
+  const renderResultsContent = () => {
+    if (resultsLoading) {
+      return (
+        <View style={styles.resultsLoading}>
+          <ActivityIndicator size="small" color={theme.cosmicIndigo} />
+          <ThemedText type="code" themeColor="textSecondary">Retrieving standings...</ThemedText>
+        </View>
+      );
+    }
+
+    if (sessionResults.length === 0) {
+      return (
+        <View style={styles.emptyResults}>
+          <ThemedText type="code" style={styles.emptyText} themeColor="textSecondary">
+            No results available for this session.
+          </ThemedText>
+        </View>
+      );
+    }
+
+    return (
+      <ScrollView style={styles.resultsTableWrapper} nestedScrollEnabled>
+        <View style={styles.table}>
+          {/* Header */}
+          <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
+            <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
+            <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
+            <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">LAPS</ThemedText>
+            <ThemedText type="code" style={styles.colTime} themeColor="textSecondary">GAP/TIME</ThemedText>
+            {selectedSession?.session_type === 'Race' && (
+              <ThemedText type="code" style={styles.colPts} themeColor="textSecondary">PTS</ThemedText>
+            )}
+          </View>
+
+          {/* Rows */}
+          {sessionResults.map((entry) => {
+            const borderCol = entry.driver?.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
+            
+            return (
+              <View 
+                key={entry.driver_number} 
+                style={[styles.tableRow, { borderBottomColor: 'rgba(128,128,128,0.06)' }]}
+              >
+                {/* Left team color line */}
+                <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
+
+                <ThemedText type="code" style={[styles.colPos, { fontWeight: 'bold' }]}>
+                  {entry.dnf ? 'DNF' : (entry.position ?? '-')}
+                </ThemedText>
+
+                <View style={styles.driverColContainer}>
+                  <ThemedText type="smallBold" style={styles.driverAcronym}>
+                    {entry.driver?.name_acronym || entry.driver_number}
+                  </ThemedText>
+                  <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
+                    {entry.driver ? entry.driver.full_name.split(' ').slice(-1)[0] : `CAR ${entry.driver_number}`}
+                  </ThemedText>
+                </View>
+
+                <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">
+                  {entry.number_of_laps}
+                </ThemedText>
+
+                <ThemedText type="code" style={styles.colTime} themeColor="text">
+                  {entry.dnf ? 'DNF' : (entry.dns ? 'DNS' : (entry.gap_to_leader === 0 || entry.gap_to_leader === '0' ? 'LEADER' : (entry.gap_to_leader ? `+${entry.gap_to_leader}s` : formatLapTime(entry.duration))))}
+                </ThemedText>
+
+                {selectedSession?.session_type === 'Race' && (
+                  <ThemedText type="code" style={[styles.colPts, entry.points > 0 && { color: theme.solarAmber, fontWeight: 'bold' }]} themeColor="text">
+                    {entry.points}
+                  </ThemedText>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      </ScrollView>
+    );
+  };
+
   return (
     <ScrollView
       style={[styles.scrollView, { backgroundColor: theme.background }]}
@@ -134,67 +325,201 @@ export default function TabTwoScreen() {
       contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
       <ThemedView style={styles.container}>
         
-        {/* TITLE SECTION */}
+        {/* HEADER SECTION WITH TOGGLER */}
         <ThemedView style={styles.titleContainer}>
-          <ThemedText type="subtitle" style={styles.titleText}>PLANET EXPLORER</ThemedText>
-          <ThemedText style={styles.subtitleText} themeColor="textSecondary">
-            Explore solar system telemetry, physical statistics, and simulate planetary gravity.
-          </ThemedText>
+          <View style={styles.headerRow}>
+            <View style={styles.headerTitles}>
+              <ThemedText type="subtitle" style={styles.titleText}>F1 SESSIONS CALENDAR</ThemedText>
+              <ThemedText style={styles.subtitleText} themeColor="textSecondary">
+                Browse Grand Prix weekends of the championship and inspect final timings.
+              </ThemedText>
+            </View>
+
+            {/* TIMEZONE TOGGLER BUTTON */}
+            <Pressable
+              onPress={() => setUseLocalTime(!useLocalTime)}
+              style={({ pressed }) => [
+                styles.timeToggleBtn,
+                { backgroundColor: theme.backgroundElement },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              <SymbolView
+                name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
+                size={12}
+                tintColor={theme.cosmicIndigo}
+              />
+              <ThemedText type="code" style={styles.timeToggleText}>
+                {useLocalTime ? 'MY LOCATION' : 'TRACK LOCAL'}
+              </ThemedText>
+            </Pressable>
+          </View>
         </ThemedView>
 
-        {/* PLANETS LIST */}
-        <View style={styles.listWrapper}>
-          {PLANETS.map((planet) => (
-            <ThemedView
-              key={planet.name}
-              style={[
-                styles.planetCard,
-                {
-                  backgroundColor: theme.cardBackground,
-                  borderColor: theme.backgroundElement,
-                },
-              ]}>
-              <Collapsible
-                title={`${planet.name.toUpperCase()}  (Gravity: ${planet.gravityRatio}x)`}>
-                <View style={styles.collapsibleInner}>
+        {/* CONTENT LAYOUT */}
+        <View style={styles.contentLayout}>
+          
+          {/* LEFT PANEL: SELECT MEETINGS & SESSIONS */}
+          <View style={styles.meetingsCol}>
+            {meetings.map((meeting) => {
+              const isSelectedMeeting = meeting.meeting_key === selectedMeetingKey;
+              return (
+                <ThemedView
+                  key={meeting.meeting_key}
+                  style={[
+                    styles.gpCard,
+                    {
+                      backgroundColor: theme.cardBackground,
+                      borderColor: isSelectedMeeting ? theme.neonTeal : theme.backgroundElement,
+                    },
+                  ]}>
                   
-                  {/* Overview Text */}
-                  <ThemedText type="small" style={styles.description} themeColor="text">
-                    {planet.info}
-                  </ThemedText>
+                  {/* GP Header */}
+                  <Pressable 
+                    onPress={() => {
+                      setSelectedMeetingKey(meeting.meeting_key);
+                      if (meeting.sessions.length > 0) {
+                        setSelectedSessionKey(meeting.sessions[0].session_key);
+                      }
+                    }}
+                    style={styles.gpCardHeader}
+                  >
+                    <View style={styles.gpMeta}>
+                      <ThemedText type="smallBold" style={styles.gpMeetingTitle}>
+                        {meeting.location.toUpperCase()} GRAND PRIX
+                      </ThemedText>
+                      <ThemedText type="code" style={styles.gpCircuitName} themeColor="textSecondary">
+                        {meeting.circuit_short_name} • {meeting.country_name}
+                      </ThemedText>
+                    </View>
+                    <SymbolView
+                      name={isSelectedMeeting ? { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' } : { ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
+                      size={14}
+                      tintColor={theme.textSecondary}
+                    />
+                  </Pressable>
 
-                  {/* Planet Quick Data Grid */}
-                  <View style={styles.specGrid}>
-                    <View style={[styles.specItem, { backgroundColor: theme.background }]}>
-                      <ThemedText type="code" style={styles.specLabel} themeColor="textSecondary">DISTANCE</ThemedText>
-                      <ThemedText type="code" style={styles.specValue} themeColor="text">{planet.distance}</ThemedText>
+                  {/* Sessions details lists */}
+                  {isSelectedMeeting && (
+                    <View style={[styles.sessionsList, { borderTopColor: theme.backgroundElement }]}>
+                      {meeting.sessions.map((sess) => {
+                        const isSelectedSess = sess.session_key === selectedSessionKey;
+                        return (
+                          <Pressable
+                            key={sess.session_key}
+                            onPress={() => {
+                              setSelectedSessionKey(sess.session_key);
+                              if (Platform.OS !== 'web') {
+                                setModalVisible(true);
+                              }
+                            }}
+                            style={({ pressed }) => [
+                              styles.sessionItem,
+                              isSelectedSess && [styles.sessionItemActive, { backgroundColor: theme.backgroundSelected }],
+                              pressed && { opacity: 0.8 },
+                            ]}
+                          >
+                            <View style={styles.sessionStatusCol}>
+                              <ThemedText type="code" style={[styles.sessionName, isSelectedSess && { color: theme.neonTeal }]} themeColor="text">
+                                {sess.session_name}
+                              </ThemedText>
+                              <ThemedText type="code" style={styles.sessionTime} themeColor="textSecondary">
+                                {formatTime(sess.date_start, meeting.gmt_offset)}
+                              </ThemedText>
+                            </View>
+                            <SymbolView
+                              name={{ ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
+                              size={12}
+                              tintColor={isSelectedSess ? theme.neonTeal : theme.backgroundElement}
+                            />
+                          </Pressable>
+                        );
+                      })}
                     </View>
-                    <View style={[styles.specItem, { backgroundColor: theme.background }]}>
-                      <ThemedText type="code" style={styles.specLabel} themeColor="textSecondary">DAY LENGTH</ThemedText>
-                      <ThemedText type="code" style={styles.specValue} themeColor="text">{planet.dayLength}</ThemedText>
-                    </View>
-                    <View style={[styles.specItem, { backgroundColor: theme.background }]}>
-                      <ThemedText type="code" style={styles.specLabel} themeColor="textSecondary">YEAR LENGTH</ThemedText>
-                      <ThemedText type="code" style={styles.specValue} themeColor="text">{planet.yearLength}</ThemedText>
-                    </View>
-                    <View style={[styles.specItem, { backgroundColor: theme.background }]}>
-                      <ThemedText type="code" style={styles.specLabel} themeColor="textSecondary">MOONS</ThemedText>
-                      <ThemedText type="code" style={styles.specValue} themeColor="text">{planet.moons}</ThemedText>
+                  )}
+
+                </ThemedView>
+              );
+            })}
+          </View>
+
+          {/* RIGHT PANEL: SESSION RESULTS (ONLY ON WEB) */}
+          {Platform.OS === 'web' && (
+            <View style={styles.resultsCol}>
+              {selectedSession ? (
+                <ThemedView
+                  style={[
+                    styles.resultsCard,
+                    { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
+                  ]}
+                >
+                  {/* Header info */}
+                  <View style={[styles.resultsHeader, { borderBottomColor: theme.backgroundElement }]}>
+                    <SymbolView
+                      name={{ ios: 'trophy.fill', android: 'emoji_events', web: 'emoji_events' }}
+                      size={16}
+                      tintColor={theme.solarAmber}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <ThemedText type="subtitle" style={styles.resultsTitle}>
+                        {selectedSession.session_name.toUpperCase()} RESULTS
+                      </ThemedText>
+                      <ThemedText type="code" style={styles.resultsSubtitle} themeColor="textSecondary">
+                        {selectedMeeting?.location} GP • {selectedSession.year}
+                      </ThemedText>
                     </View>
                   </View>
-
-                  {/* Integrated Gravity Simulator */}
-                  <GravitySimulator
-                    planetName={planet.name}
-                    gravityRatio={planet.gravityRatio}
-                    funFact={planet.funFact}
-                  />
-
+                  {renderResultsContent()}
+                </ThemedView>
+              ) : (
+                <View style={styles.noSelection}>
+                  <ThemedText type="code" themeColor="textSecondary">Select GP session to view results.</ThemedText>
                 </View>
-              </Collapsible>
-            </ThemedView>
-          ))}
+              )}
+            </View>
+          )}
+
         </View>
+
+        {/* MOBILE SLIDE-UP BOTTOM SHEET FOR EXPLORER RESULTS */}
+        {Platform.OS !== 'web' && selectedSession && (
+          <Modal
+            animationType="slide"
+            transparent={true}
+            visible={modalVisible}
+            onRequestClose={() => setModalVisible(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalContent, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+                {/* Visual drag handle indicator */}
+                <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
+                
+                <View style={styles.modalHeaderRow}>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText type="smallBold" themeColor="text">
+                      {selectedSession.session_name.toUpperCase()} STANDINGS
+                    </ThemedText>
+                    <ThemedText type="code" style={styles.resultsSubtitleMobile} themeColor="textSecondary">
+                      {selectedMeeting?.location} GP
+                    </ThemedText>
+                  </View>
+                  <Pressable 
+                    onPress={() => setModalVisible(false)}
+                    style={({ pressed }) => [
+                      styles.modalCloseBtn, 
+                      { backgroundColor: theme.backgroundElement },
+                      pressed && { opacity: 0.7 }
+                    ]}
+                  >
+                    <ThemedText type="code" style={styles.modalCloseBtnText} themeColor="text">CLOSE</ThemedText>
+                  </Pressable>
+                </View>
+
+                {renderResultsContent()}
+              </View>
+            </View>
+          </Modal>
+        )}
 
         {Platform.OS === 'web' && <WebBadge />}
       </ThemedView>
@@ -217,55 +542,276 @@ const styles = StyleSheet.create({
     gap: Spacing.four,
     alignItems: 'stretch',
   },
-  titleContainer: {
-    gap: Spacing.one,
+  loadingWrapper: {
+    flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.three,
+  },
+  titleContainer: {
     paddingVertical: Spacing.four,
+    alignItems: 'stretch',
+  },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+  },
+  headerTitles: {
+    gap: Spacing.one,
+    flex: 1,
+    minWidth: 280,
   },
   titleText: {
     fontWeight: 'bold',
     letterSpacing: 1.5,
   },
   subtitleText: {
-    textAlign: 'center',
-    fontSize: 14,
-    lineHeight: 20,
-    maxWidth: 550,
-  },
-  listWrapper: {
-    gap: Spacing.three,
-  },
-  planetCard: {
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-  },
-  collapsibleInner: {
-    gap: Spacing.three,
-  },
-  description: {
     fontSize: 13,
     lineHeight: 18,
   },
-  specGrid: {
+  timeToggleBtn: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  specItem: {
-    flex: 1,
-    minWidth: 120,
-    padding: Spacing.two,
-    borderRadius: Spacing.two,
     alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.03)',
+  },
+  timeToggleText: {
+    fontSize: 9.5,
+    fontWeight: 'bold',
+  },
+  contentLayout: {
+    flexDirection: 'row',
+    gap: Spacing.four,
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+  },
+  meetingsCol: {
+    flex: 1,
+    minWidth: 320,
+    gap: Spacing.three,
+  },
+  resultsCol: {
+    flex: 1.2,
+    minWidth: 320,
+  },
+  gpCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  gpCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: Spacing.three,
+  },
+  gpMeta: {
     gap: 2,
   },
-  specLabel: {
-    fontSize: 9,
-    letterSpacing: 0.5,
+  gpMeetingTitle: {
+    fontSize: 12,
+    fontWeight: 'bold',
   },
-  specValue: {
+  gpCircuitName: {
+    fontSize: 9.5,
+  },
+  sessionsList: {
+    borderTopWidth: 1,
+    padding: Spacing.two,
+    gap: Spacing.one,
+  },
+  sessionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+  },
+  sessionItemActive: {
+    borderWidth: 0,
+  },
+  sessionStatusCol: {
+    gap: 2,
+  },
+  sessionName: {
     fontSize: 11,
+    fontWeight: 'bold',
+  },
+  sessionTime: {
+    fontSize: 9.5,
+  },
+  resultsCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    padding: Spacing.three,
+    gap: Spacing.three,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  resultsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingBottom: Spacing.two,
+    borderBottomWidth: 1,
+  },
+  resultsTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  resultsSubtitle: {
+    fontSize: 10,
+    marginTop: 2,
+  },
+  resultsSubtitleMobile: {
+    fontSize: 8.5,
+  },
+  resultsLoading: {
+    height: 180,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+  },
+  emptyResults: {
+    paddingVertical: Spacing.six,
+    alignItems: 'center',
+  },
+  emptyText: {
+    fontSize: 11,
+  },
+  noSelection: {
+    flex: 1,
+    height: 200,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderRadius: Spacing.three,
+    borderColor: 'rgba(128,128,128,0.2)',
+  },
+  resultsTableWrapper: {
+    maxHeight: 450,
+  },
+  table: {
+    alignSelf: 'stretch',
+  },
+  tableHeader: {
+    flexDirection: 'row',
+    paddingBottom: Spacing.one,
+    borderBottomWidth: 1,
+    paddingHorizontal: Spacing.two,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    paddingVertical: Spacing.two,
+    borderBottomWidth: 1,
+    alignItems: 'center',
+    paddingRight: Spacing.two,
+    position: 'relative',
+  },
+  teamLine: {
+    width: 3,
+    position: 'absolute',
+    left: 0,
+    top: Spacing.one,
+    bottom: Spacing.one,
+    borderRadius: 1.5,
+  },
+  colPos: {
+    width: 35,
+    fontSize: 10,
+    textAlign: 'center',
+  },
+  colDriver: {
+    flex: 2,
+    fontSize: 10,
+  },
+  driverColContainer: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  driverAcronym: {
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  driverLastName: {
+    fontSize: 10.5,
+    flex: 1,
+  },
+  colLaps: {
+    width: 40,
+    fontSize: 10,
+    textAlign: 'center',
+  },
+  colTime: {
+    flex: 2.2,
+    fontSize: 10,
+    textAlign: 'right',
+  },
+  colPts: {
+    width: 35,
+    fontSize: 10,
+    textAlign: 'right',
+  },
+  // Modal spec styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    borderTopLeftRadius: Spacing.four,
+    borderTopRightRadius: Spacing.four,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    maxHeight: '82%',
+    padding: Spacing.three,
+    gap: Spacing.three,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  modalHandle: {
+    width: 40,
+    height: 5,
+    borderRadius: 2.5,
+    alignSelf: 'center',
+    marginBottom: Spacing.one,
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingBottom: Spacing.one,
+  },
+  modalCloseBtn: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.two,
+  },
+  modalCloseBtnText: {
+    fontSize: 9.5,
     fontWeight: 'bold',
   },
 });

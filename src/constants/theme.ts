@@ -9,26 +9,26 @@ import { Platform } from 'react-native';
 
 export const Colors = {
   light: {
-    text: '#0b0b1a',
-    background: '#f5f6fa',
-    backgroundElement: '#eef0f6',
-    backgroundSelected: '#e0e3ee',
+    text: '#0a0a0f',
+    background: '#f1f2f6',
+    backgroundElement: '#e4e6eb',
+    backgroundSelected: '#fce8e6',
     textSecondary: '#4b5563',
-    cosmicIndigo: '#312e81',
-    neonTeal: '#0d9488',
-    solarAmber: '#d97706',
+    cosmicIndigo: '#e10600', // Racing Red
+    neonTeal: '#00b0ff',     // Sector Blue
+    solarAmber: '#ff9100',   // Sector Yellow
     cardBackground: '#ffffff',
   },
   dark: {
     text: '#f8fafc',
-    background: '#04040c',
-    backgroundElement: '#0f1123',
-    backgroundSelected: '#1e1b4b',
+    background: '#08090c',        // Asphalt Carbon
+    backgroundElement: '#161722', // Deep border/card frame
+    backgroundSelected: '#2c1214',// Racing Red tinted highlight
     textSecondary: '#94a3b8',
-    cosmicIndigo: '#6366f1',
-    neonTeal: '#2dd4bf',
-    solarAmber: '#fbbf24',
-    cardBackground: '#0c0f24',
+    cosmicIndigo: '#ff1801',      // Glowing Racing Red
+    neonTeal: '#00e5ff',          // Sector Blue
+    solarAmber: '#ffea00',        // Sector Yellow
+    cardBackground: '#0f101a',    // High-tech dashboard card
   },
 } as const;
 
