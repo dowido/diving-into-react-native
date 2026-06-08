@@ -74,6 +74,7 @@ export default function LiveTimingScreen() {
   });
 
   const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = useState<'home' | 'console'>('home');
   const [session, setSession] = useState<any>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [raceControl, setRaceControl] = useState<RaceControlMessage[]>([]);
@@ -86,6 +87,10 @@ export default function LiveTimingScreen() {
 
   // Mobile Bottom Sheet Modal Visibility
   const [modalVisible, setModalVisible] = useState(false);
+
+  // Home Screen States
+  const [showFullStandings, setShowFullStandings] = useState(false);
+  const [countdownText, setCountdownText] = useState('');
 
   // Animated flag opacity for warning flashers
   const flagOpacity = useRef(new Animated.Value(1)).current;
@@ -112,6 +117,31 @@ export default function LiveTimingScreen() {
       flagOpacity.setValue(1.0);
     }
   }, [trackFlag]);
+
+  // Dynamic countdown timer for upcoming session
+  useEffect(() => {
+    if (!session || isLive) return;
+    const interval = setInterval(() => {
+      const now = new Date().getTime();
+      const start = new Date(session.date_start).getTime();
+      const diff = start - now;
+      if (diff <= 0) {
+        setCountdownText('SESSION COMPLETED');
+        clearInterval(interval);
+      } else {
+        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+        setCountdownText(
+          `${days.toString().padStart(2, '0')}d : ${hours.toString().padStart(2, '0')}h : ${minutes
+            .toString()
+            .padStart(2, '0')}m : ${seconds.toString().padStart(2, '0')}s`
+        );
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [session, isLive]);
 
   const fetchData = async (isPoll = false) => {
     try {
@@ -500,286 +530,518 @@ export default function LiveTimingScreen() {
       contentInset={insets}
       contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
       <ThemedView style={styles.container}>
-        
-        {/* HERO TITLE SECTION */}
-        {session && (
-          <ThemedView style={styles.heroSection}>
-            <View style={styles.headerRow}>
-              <View style={styles.gpDetails}>
-                {/* Red accent bar */}
-                <View style={styles.accentBar} />
-                <ThemedText type="subtitle" style={styles.gpTitle} themeColor="text">
-                  {session.location.toUpperCase()} GRAND PRIX
-                </ThemedText>
-                <ThemedText style={styles.gpSubtitle} themeColor="textSecondary">
-                  {session.circuit_short_name} · {session.session_type} · {session.year}
-                </ThemedText>
-                <ThemedText type="code" style={styles.sessionTimesHeader} themeColor="textSecondary">
-                  Start: {formatTime(session.date_start)} — End: {formatTime(session.date_end)}
-                </ThemedText>
-              </View>
 
-              {/* TIMEZONE TOGGLER BUTTON */}
-              <Pressable
-                onPress={() => setUseLocalTime(!useLocalTime)}
-                style={({ pressed }) => [
-                  styles.timeToggleBtn,
-                  { backgroundColor: theme.backgroundElement, borderColor: useLocalTime ? theme.neonTeal : theme.cosmicIndigo },
-                  pressed && { opacity: 0.7 },
-                ]}
-              >
-                <SymbolView
-                  name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
-                  size={13}
-                  tintColor={useLocalTime ? theme.neonTeal : theme.cosmicIndigo}
-                />
-                <ThemedText type="code" style={[styles.timeToggleText, { color: useLocalTime ? theme.neonTeal : theme.cosmicIndigo }]}>
-                  {useLocalTime ? '⊙ MY TIME' : '◎ TRACK TIME'}
-                </ThemedText>
-              </Pressable>
-            </View>
-
-            {/* LIVE TRACK FLAG BANNER (ANIMATED PULSE) */}
-            <Animated.View style={[styles.flagBanner, { opacity: flagOpacity, backgroundColor: getFlagColor(trackFlag) }]}>
-              <SymbolView
-                name={{ ios: 'flag.fill', android: 'flag', web: 'flag' }}
-                size={15}
-                tintColor="#000000"
-              />
-              <ThemedText type="smallBold" style={styles.flagText}>
-                {getFlagLabel(trackFlag)}
-              </ThemedText>
-              {isLive && (
-                <View style={styles.liveIndicator}>
-                  <View style={styles.liveDot} />
-                  <ThemedText type="code" style={styles.liveText}>LIVE</ThemedText>
-                </View>
-              )}
-            </Animated.View>
-          </ThemedView>
-        )}
-
-        {/* RESPONSIVE LAYOUT */}
-        <View style={styles.mainLayout}>
-          
-          {/* LEADERBOARD STANDINGS */}
-          <View style={styles.leaderboardContainer}>
-            <ThemedView 
+        {viewMode === 'home' ? (
+          <View style={styles.homeDashboard}>
+            {/* Section 1: The Context Hero (Adaptable) */}
+            <ThemedView
               style={[
-                styles.sectionCard, 
-                { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
+                styles.heroCard,
+                { backgroundColor: theme.cardBackground, borderColor: isLive ? theme.cosmicIndigo : theme.backgroundElement }
               ]}
             >
-              {/* Red accent bar at top of card */}
-              <View style={styles.cardAccentBar} />
-              <View style={styles.sectionHeader}>
-                <SymbolView
-                  name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
-                  size={15}
-                  tintColor={theme.cosmicIndigo}
-                />
-                <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
-                  SESSION STANDINGS
-                </ThemedText>
-                {leaderboard.length > 0 && (
-                  <View style={[styles.driverCountBadge, { backgroundColor: theme.backgroundElement }]}>
-                    <ThemedText type="code" style={[styles.driverCountText, { color: theme.textSecondary }]}>
-                      {leaderboard.length} CARS
+              <View style={styles.heroHeaderRow}>
+                {isLive ? (
+                  <View style={styles.liveIndicatorRow}>
+                    <View style={styles.pulsingLiveDot} />
+                    <ThemedText type="smallBold" style={{ color: theme.cosmicIndigo, letterSpacing: 1 }}>
+                      LIVE: {session?.location?.toUpperCase()} GRAND PRIX
                     </ThemedText>
                   </View>
+                ) : (
+                  <ThemedText type="smallBold" themeColor="textSecondary" style={{ letterSpacing: 1 }}>
+                    UPCOMING: {session?.location?.toUpperCase()} GP
+                  </ThemedText>
                 )}
               </View>
 
-              <View style={styles.table}>
-                {/* Header */}
-                <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
-                  <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
-                  <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
-                  <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">LAPS</ThemedText>
-                  <ThemedText type="code" style={styles.colAge} themeColor="textSecondary">AGE</ThemedText>
-                  <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">GAP</ThemedText>
-                </View>
-
-                {/* Rows */}
-                {leaderboard.map((entry) => {
-                  const isSelected = entry.driver_number === selectedDriverNumber;
-                  const borderCol = entry.driver.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
-
-                  return (
+              <View style={styles.heroBody}>
+                {isLive ? (
+                  <View style={styles.heroLiveContent}>
+                    <ThemedText style={styles.heroGPTitle} themeColor="text">
+                      {session?.circuit_short_name} · {session?.session_type}
+                    </ThemedText>
                     <Pressable
-                      key={entry.driver_number}
-                      onPress={() => {
-                        setSelectedDriverNumber(entry.driver_number);
-                        if (Platform.OS !== 'web') {
-                          setModalVisible(true);
-                        }
-                      }}
+                      onPress={() => setViewMode('console')}
                       style={({ pressed }) => [
-                        styles.tableRow,
-                        { borderBottomColor: 'rgba(128,128,128,0.06)' },
-                        isSelected && { backgroundColor: theme.backgroundSelected },
-                        pressed && { opacity: 0.8 },
+                        styles.heroLaunchBtn,
+                        { backgroundColor: theme.cosmicIndigo },
+                        pressed && { opacity: 0.9 }
                       ]}
                     >
-                      {/* Left color bar */}
-                      <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
-                      
-                      {/* Position */}
-                      <ThemedText 
-                        type="code" 
-                        style={[
-                          styles.colPos, 
-                          { fontWeight: 'bold' },
-                          entry.dnf && { color: theme.textSecondary }
-                        ]}
-                      >
-                        {entry.dnf ? 'DNF' : (entry.position ?? '-')}
-                      </ThemedText>
-
-                      {/* Driver Details with Avatar & Tyre Badge */}
-                      <View style={styles.driverColContainer}>
-                        {entry.driver.headshot_url ? (
-                          <Image
-                            source={{ uri: entry.driver.headshot_url }}
-                            style={styles.driverAvatarRow}
-                            resizeMode="contain"
-                          />
-                        ) : (
-                          <View style={[styles.driverAvatarFallbackRow, { backgroundColor: theme.backgroundElement }]} />
-                        )}
-
-                        <ThemedText type="smallBold" style={styles.driverAcronym} themeColor="text">
-                          {entry.driver.name_acronym}
-                        </ThemedText>
-
-                        {/* Tyre Compound Badge */}
-                        {entry.compound && (
-                          <View 
-                            style={[
-                              styles.miniTyreBadge, 
-                              { 
-                                borderColor: getTyreColor(entry.compound)
-                              }
-                            ]}
-                          >
-                            <ThemedText 
-                              type="code" 
-                              style={[
-                                styles.miniTyreText, 
-                                { color: getTyreColor(entry.compound) }
-                              ]}
-                            >
-                              {getTyreLabel(entry.compound)}
-                            </ThemedText>
-                          </View>
-                        )}
-
-                        <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
-                          {entry.driver.last_name}
-                        </ThemedText>
-                      </View>
-
-                      {/* Laps */}
-                      <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">
-                        {entry.number_of_laps}
-                      </ThemedText>
-
-                      {/* Stint age */}
-                      <ThemedText
-                        type="code"
-                        style={[styles.colAge, entry.stint_age && entry.stint_age > 20 ? { color: '#f59e0b' } : undefined]}
-                        themeColor={entry.stint_age && entry.stint_age > 20 ? undefined : 'textSecondary'}
-                      >
-                        {entry.stint_age ?? '—'}
-                      </ThemedText>
-
-                      {/* Gap */}
-                      <ThemedText type="code" style={styles.colGap} themeColor="text">
-                        {entry.gap_to_leader}
-                      </ThemedText>
+                      <SymbolView
+                        name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
+                        size={14}
+                        tintColor="#ffffff"
+                      />
+                      <ThemedText style={styles.heroLaunchBtnText}>JOIN LIVE PIT WALL STREAM</ThemedText>
                     </Pressable>
-                  );
-                })}
+                  </View>
+                ) : (
+                  <View style={styles.heroOfflineContent}>
+                    <ThemedText style={styles.countdownValue} themeColor="text">
+                      {countdownText || "00d : 00h : 00m : 00s"}
+                    </ThemedText>
+                    <ThemedText style={styles.heroGPTitleOffline} themeColor="textSecondary">
+                      FP1 Starts: {session ? formatTime(session.date_start) : '--:--:--'}
+                    </ThemedText>
+
+                    {/* Minimalist SVG track trace background */}
+                    <View style={styles.minimalistTrace}>
+                      <svg width="100%" height="40" viewBox="0 0 100 40" style={{ opacity: 0.2 }}>
+                        <path
+                          d="M 10 20 Q 25 5, 50 20 T 90 20"
+                          fill="none"
+                          stroke={theme.text}
+                          strokeWidth="2"
+                          strokeDasharray="4 2"
+                        />
+                      </svg>
+                    </View>
+                  </View>
+                )}
               </View>
             </ThemedView>
-          </View>
 
-          {/* TELEMETRY & FEED DETAILS SIDEBAR (ONLY ON WEB) */}
-          {Platform.OS === 'web' && selectedEntry && (
-            <View style={styles.sidebarContainer}>
-              {/* Weather conditions */}
-              <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
+            {/* Section 2: Top 5 / Collapsible Grid Standings */}
+            {leaderboard.length > 0 && (
+              <ThemedView
+                style={[
+                  styles.gridCard,
+                  { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
+                ]}
+              >
+                <View style={styles.gridCardHeader}>
+                  <SymbolView
+                    name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
+                    size={16}
+                    tintColor={theme.cosmicIndigo}
+                  />
+                  <ThemedText type="smallBold" themeColor="text" style={{ letterSpacing: 0.5 }}>
+                    {showFullStandings ? "FULL GRID STANDINGS" : "TOP 5 STANDINGS"}
+                  </ThemedText>
+                  <ThemedText type="code" themeColor="textSecondary" style={{ fontSize: 9, marginLeft: 'auto' }}>
+                    {leaderboard.length} CARS
+                  </ThemedText>
+                </View>
 
-              {/* Circuit Map */}
-              <CircuitMap
-                sessionKey={session?.session_key ?? null}
-                drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
-                isLive={isLive}
-                highlightDriverNumber={selectedDriverNumber}
-              />
+                <View style={styles.table}>
+                  {/* Header */}
+                  <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
+                    <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
+                    <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
+                    <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">INTERVAL</ThemedText>
+                  </View>
 
-              <View style={styles.detailCardGroup}>
-                <F1Telemetry
-                  driverNumber={selectedEntry.driver_number}
-                  sessionKey={session?.session_key}
-                  driverColor={selectedEntry.driver.team_colour}
-                  session={session}
+                  {/* Rows */}
+                  {leaderboard.slice(0, showFullStandings ? leaderboard.length : 5).map((entry) => {
+                    const borderCol = entry.driver.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
+                    return (
+                      <View key={entry.driver_number} style={[styles.tableRow, { borderBottomColor: 'rgba(128,128,128,0.06)' }]}>
+                        <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
+                        <ThemedText type="code" style={[styles.colPos, { fontWeight: 'bold' }]}>
+                          {entry.position ?? '-'}
+                        </ThemedText>
+
+                        <View style={styles.driverColContainer}>
+                          <ThemedText type="smallBold" style={styles.driverAcronym} themeColor="text">
+                            {entry.driver.name_acronym}
+                          </ThemedText>
+                          {entry.compound && (
+                            <View style={[styles.miniTyreBadge, { borderColor: getTyreColor(entry.compound) }]}>
+                              <ThemedText type="code" style={[styles.miniTyreText, { color: getTyreColor(entry.compound) }]}>
+                                {getTyreLabel(entry.compound)}
+                              </ThemedText>
+                            </View>
+                          )}
+                          <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
+                            {entry.driver.last_name}
+                          </ThemedText>
+                        </View>
+
+                        <ThemedText type="code" style={styles.colGap} themeColor="text">
+                          {entry.gap_to_leader}
+                        </ThemedText>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                <Pressable
+                  onPress={() => setShowFullStandings(!showFullStandings)}
+                  style={({ pressed }) => [
+                    styles.expandButton,
+                    { backgroundColor: theme.backgroundElement },
+                    pressed && { opacity: 0.8 }
+                  ]}
+                >
+                  <ThemedText type="code" style={styles.expandButtonText} themeColor="text">
+                    {showFullStandings ? "↑ COLLAPSE GRID" : "↓ VIEW FULL 20-DRIVER GRID"}
+                  </ThemedText>
+                </Pressable>
+              </ThemedView>
+            )}
+
+            {/* Section 3: Head-to-Head Battle Cards */}
+            <View style={styles.battleSection}>
+              <ThemedText type="smallBold" themeColor="textSecondary" style={{ letterSpacing: 0.8, marginBottom: Spacing.two }}>
+                HEAD-TO-HEAD DUELS
+              </ThemedText>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.battleCarousel}
+              >
+                {/* Battle 1: VER vs NOR */}
+                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+                  <View style={[styles.battleTeamAccent, { backgroundColor: '#FF8000' }]} />
+                  <ThemedText type="code" style={styles.battleCategory}>STANDINGS DUEL</ThemedText>
+                  <View style={styles.battleRowContent}>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#3671C6', fontWeight: 'bold' }}>VER</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Red Bull</ThemedText>
+                    </View>
+                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#FF8000', fontWeight: 'bold' }}>NOR</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">McLaren</ThemedText>
+                    </View>
+                  </View>
+                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
+                    GAP: +18 PTS (VER lead)
+                  </ThemedText>
+                </ThemedView>
+
+                {/* Battle 2: HAM vs LEC */}
+                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+                  <View style={[styles.battleTeamAccent, { backgroundColor: '#E8002D' }]} />
+                  <ThemedText type="code" style={styles.battleCategory}>SCUDERIA DELTA</ThemedText>
+                  <View style={styles.battleRowContent}>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#E8002D', fontWeight: 'bold' }}>HAM</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Ferrari</ThemedText>
+                    </View>
+                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#ffffff', fontWeight: 'bold' }}>LEC</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Ferrari</ThemedText>
+                    </View>
+                  </View>
+                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
+                    GAP: +6 PTS (HAM lead)
+                  </ThemedText>
+                </ThemedView>
+
+                {/* Battle 3: ANT vs RUS */}
+                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+                  <View style={[styles.battleTeamAccent, { backgroundColor: '#27F4D2' }]} />
+                  <ThemedText type="code" style={styles.battleCategory}>SILVER ARROWS DELTA</ThemedText>
+                  <View style={styles.battleRowContent}>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#27F4D2', fontWeight: 'bold' }}>ANT</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Mercedes</ThemedText>
+                    </View>
+                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
+                    <View style={styles.battleDriverCol}>
+                      <ThemedText type="subtitle" style={{ color: '#a1a1aa', fontWeight: 'bold' }}>RUS</ThemedText>
+                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Mercedes</ThemedText>
+                    </View>
+                  </View>
+                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
+                    GAP: +6 PTS (ANT lead)
+                  </ThemedText>
+                </ThemedView>
+              </ScrollView>
+            </View>
+
+            {/* Section 4: Live Race Control Terminal (Filtered to 3) */}
+            <ThemedView
+              style={[
+                styles.filteredFeedCard,
+                { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
+              ]}
+            >
+              <View style={styles.gridCardHeader}>
+                <SymbolView
+                  name={{ ios: 'bell.badge.fill', android: 'notifications_active', web: 'notifications_active' }}
+                  size={15}
+                  tintColor={theme.solarAmber}
                 />
-                <F1DriverCard
-                  driver={selectedEntry.driver}
-                  sessionKey={session?.session_key}
-                  useLocalTime={useLocalTime}
-                />
+                <ThemedText type="smallBold" themeColor="text" style={{ letterSpacing: 0.8 }}>
+                  RACE CONTROL TERMINAL (LATEST)
+                </ThemedText>
               </View>
 
-              {renderRaceControlFeed()}
-            </View>
-          )}
+              <View style={styles.filteredFeedList}>
+                {raceControl.slice(0, 3).length === 0 ? (
+                  <ThemedText type="code" style={{ textAlign: 'center', paddingVertical: Spacing.two }} themeColor="textSecondary">
+                    No logs recorded.
+                  </ThemedText>
+                ) : (
+                  raceControl.slice(0, 3).map((msg, i) => {
+                    const dotCol = msg.flag ? getFlagColor(msg.flag) : '#4b5563';
+                    return (
+                      <View key={i} style={styles.filteredFeedItem}>
+                        <View style={[styles.statusDot, { backgroundColor: dotCol }]} />
+                        <ThemedText type="code" style={styles.filteredFeedTime} themeColor="textSecondary">
+                          [{formatTime(msg.date)}]
+                        </ThemedText>
+                        <ThemedText type="code" style={styles.filteredFeedText} themeColor="text" numberOfLines={1}>
+                          {msg.message}
+                        </ThemedText>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            </ThemedView>
 
-          {/* ON MOBILE, RENDER WEATHER + CIRCUIT MAP + RACE CONTROL FEED BELOW THE STANDINGS */}
-          {Platform.OS !== 'web' && (
-            <View style={styles.leaderboardContainer}>
-              <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
-              <CircuitMap
-                sessionKey={session?.session_key ?? null}
-                drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
-                isLive={isLive}
-                highlightDriverNumber={selectedDriverNumber}
+            {/* Launch Console CTA */}
+            <Pressable
+              onPress={() => setViewMode('console')}
+              style={({ pressed }) => [
+                styles.consoleLaunchBtn,
+                { backgroundColor: theme.cosmicIndigo },
+                pressed && { opacity: 0.9 },
+              ]}
+            >
+              <SymbolView
+                name={{ ios: 'terminal.fill', android: 'terminal', web: 'terminal' }}
+                size={20}
+                tintColor="#ffffff"
               />
-              {renderRaceControlFeed()}
+              <ThemedText type="subtitle" style={styles.consoleLaunchText}>
+                LAUNCH PIT WALL CONSOLE
+              </ThemedText>
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            {/* Live timing console back button & header */}
+            <View style={styles.consoleHeader}>
+              <Pressable
+                onPress={() => setViewMode('home')}
+                style={({ pressed }) => [
+                  styles.backBtn,
+                  { backgroundColor: theme.backgroundElement },
+                  pressed && { opacity: 0.8 },
+                ]}
+              >
+                <SymbolView
+                  name={{ ios: 'chevron.left', android: 'chevron_left', web: 'arrow_back' }}
+                  size={14}
+                  tintColor={theme.text}
+                />
+                <ThemedText type="code" style={[styles.backBtnText, { color: theme.text }]}>
+                  BACK
+                </ThemedText>
+              </Pressable>
+
+              <ThemedText type="code" style={[styles.consoleModeLabel, { color: theme.neonTeal }]}>
+                // PIT WALL MODE: LIVE TIMING CONSOLE
+              </ThemedText>
             </View>
-          )}
 
-        </View>
+            {/* HERO TITLE SECTION */}
+            {session && (
+              <ThemedView style={styles.heroSection}>
+                <View style={styles.headerRow}>
+                  <View style={styles.gpDetails}>
+                    <View style={styles.accentBar} />
+                    <ThemedText type="subtitle" style={styles.gpTitle} themeColor="text">
+                      {session.location.toUpperCase()} GRAND PRIX
+                    </ThemedText>
+                    <ThemedText style={styles.gpSubtitle} themeColor="textSecondary">
+                      {session.circuit_short_name} · {session.session_type} · {session.year}
+                    </ThemedText>
+                    <ThemedText type="code" style={styles.sessionTimesHeader} themeColor="textSecondary">
+                      Start: {formatTime(session.date_start)} — End: {formatTime(session.date_end)}
+                    </ThemedText>
+                  </View>
 
-        {/* MOBILE SLIDE-UP BOTTOM SHEET FOR TELEMETRY */}
-        {Platform.OS !== 'web' && selectedEntry && (
-          <Modal
-            animationType="slide"
-            transparent={true}
-            visible={modalVisible}
-            onRequestClose={() => setModalVisible(false)}
-          >
-            <View style={styles.modalOverlay}>
-              <View style={[styles.modalContent, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
-                {/* Visual drag handle indicator */}
-                <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
-                
-                <View style={styles.modalHeaderRow}>
-                  <ThemedText type="smallBold" themeColor="text">TELEMETRY & TIMINGS</ThemedText>
-                  <Pressable 
-                    onPress={() => setModalVisible(false)}
+                  <Pressable
+                    onPress={() => setUseLocalTime(!useLocalTime)}
                     style={({ pressed }) => [
-                      styles.modalCloseBtn, 
-                      { backgroundColor: theme.backgroundElement },
-                      pressed && { opacity: 0.7 }
+                      styles.timeToggleBtn,
+                      { backgroundColor: theme.backgroundElement, borderColor: useLocalTime ? theme.neonTeal : theme.cosmicIndigo },
+                      pressed && { opacity: 0.7 },
                     ]}
                   >
-                    <ThemedText type="code" style={styles.modalCloseBtnText} themeColor="text">CLOSE</ThemedText>
+                    <SymbolView
+                      name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
+                      size={13}
+                      tintColor={useLocalTime ? theme.neonTeal : theme.cosmicIndigo}
+                    />
+                    <ThemedText type="code" style={[styles.timeToggleText, { color: useLocalTime ? theme.neonTeal : theme.cosmicIndigo }]}>
+                      {useLocalTime ? '⊙ MY TIME' : '◎ TRACK TIME'}
+                    </ThemedText>
                   </Pressable>
                 </View>
 
-                <ScrollView contentContainerStyle={styles.modalScroll}>
+                <Animated.View style={[styles.flagBanner, { opacity: flagOpacity, backgroundColor: getFlagColor(trackFlag) }]}>
+                  <SymbolView
+                    name={{ ios: 'flag.fill', android: 'flag', web: 'flag' }}
+                    size={15}
+                    tintColor="#000000"
+                  />
+                  <ThemedText type="smallBold" style={styles.flagText}>
+                    {getFlagLabel(trackFlag)}
+                  </ThemedText>
+                  {isLive && (
+                    <View style={styles.liveIndicator}>
+                      <View style={styles.liveDot} />
+                      <ThemedText type="code" style={styles.liveText}>LIVE</ThemedText>
+                    </View>
+                  )}
+                </Animated.View>
+              </ThemedView>
+            )}
+
+            {/* RESPONSIVE LAYOUT */}
+            <View style={styles.mainLayout}>
+              
+              {/* LEADERBOARD STANDINGS */}
+              <View style={styles.leaderboardContainer}>
+                <ThemedView 
+                  style={[
+                    styles.sectionCard, 
+                    { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
+                  ]}
+                >
+                  <View style={styles.cardAccentBar} />
+                  <View style={styles.sectionHeader}>
+                    <SymbolView
+                      name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
+                      size={15}
+                      tintColor={theme.cosmicIndigo}
+                    />
+                    <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
+                      SESSION STANDINGS
+                    </ThemedText>
+                    {leaderboard.length > 0 && (
+                      <View style={[styles.driverCountBadge, { backgroundColor: theme.backgroundElement }]}>
+                        <ThemedText type="code" style={[styles.driverCountText, { color: theme.textSecondary }]}>
+                          {leaderboard.length} CARS
+                        </ThemedText>
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.table}>
+                    <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
+                      <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
+                      <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
+                      <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">LAPS</ThemedText>
+                      <ThemedText type="code" style={styles.colAge} themeColor="textSecondary">AGE</ThemedText>
+                      <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">GAP</ThemedText>
+                    </View>
+
+                    {leaderboard.map((entry) => {
+                      const isSelected = entry.driver_number === selectedDriverNumber;
+                      const borderCol = entry.driver.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
+
+                      return (
+                        <Pressable
+                          key={entry.driver_number}
+                          onPress={() => {
+                            setSelectedDriverNumber(entry.driver_number);
+                            if (Platform.OS !== 'web') {
+                              setModalVisible(true);
+                            }
+                          }}
+                          style={({ pressed }) => [
+                            styles.tableRow,
+                            { borderBottomColor: 'rgba(128,128,128,0.06)' },
+                            isSelected && { backgroundColor: theme.backgroundSelected },
+                            pressed && { opacity: 0.8 },
+                          ]}
+                        >
+                          <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
+                          
+                          <ThemedText 
+                            type="code" 
+                            style={[
+                              styles.colPos, 
+                              { fontWeight: 'bold' },
+                              entry.dnf && { color: theme.textSecondary }
+                            ]}
+                          >
+                            {entry.dnf ? 'DNF' : (entry.position ?? '-')}
+                          </ThemedText>
+
+                          <View style={styles.driverColContainer}>
+                            {entry.driver.headshot_url ? (
+                              <Image
+                                source={{ uri: entry.driver.headshot_url }}
+                                style={styles.driverAvatarRow}
+                                resizeMode="contain"
+                              />
+                            ) : (
+                              <View style={[styles.driverAvatarFallbackRow, { backgroundColor: theme.backgroundElement }]} />
+                            )}
+
+                            <ThemedText type="smallBold" style={styles.driverAcronym} themeColor="text">
+                              {entry.driver.name_acronym}
+                            </ThemedText>
+
+                            {entry.compound && (
+                              <View 
+                                style={[
+                                  styles.miniTyreBadge, 
+                                  { 
+                                    borderColor: getTyreColor(entry.compound)
+                                  }
+                                ]}
+                              >
+                                <ThemedText 
+                                  type="code" 
+                                  style={[
+                                    styles.miniTyreText, 
+                                    { color: getTyreColor(entry.compound) }
+                                  ]}
+                                >
+                                  {getTyreLabel(entry.compound)}
+                                </ThemedText>
+                              </View>
+                            )}
+
+                            <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
+                              {entry.driver.last_name}
+                            </ThemedText>
+                          </View>
+
+                          <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">
+                            {entry.number_of_laps}
+                          </ThemedText>
+
+                          <ThemedText
+                            type="code"
+                            style={[styles.colAge, entry.stint_age && entry.stint_age > 20 ? { color: '#f59e0b' } : undefined]}
+                            themeColor={entry.stint_age && entry.stint_age > 20 ? undefined : 'textSecondary'}
+                          >
+                            {entry.stint_age ?? '—'}
+                          </ThemedText>
+
+                          <ThemedText type="code" style={styles.colGap} themeColor="text">
+                            {entry.gap_to_leader}
+                          </ThemedText>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </ThemedView>
+              </View>
+
+              {Platform.OS === 'web' && selectedEntry && (
+                <View style={styles.sidebarContainer}>
+                  <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
+                  <CircuitMap
+                    sessionKey={session?.session_key ?? null}
+                    drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
+                    isLive={isLive}
+                    highlightDriverNumber={selectedDriverNumber}
+                  />
+
                   <View style={styles.detailCardGroup}>
                     <F1Telemetry
                       driverNumber={selectedEntry.driver_number}
@@ -793,12 +1055,72 @@ export default function LiveTimingScreen() {
                       useLocalTime={useLocalTime}
                     />
                   </View>
-                </ScrollView>
-              </View>
-            </View>
-          </Modal>
-        )}
 
+                  {renderRaceControlFeed()}
+                </View>
+              )}
+
+              {Platform.OS !== 'web' && (
+                <View style={styles.leaderboardContainer}>
+                  <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
+                  <CircuitMap
+                    sessionKey={session?.session_key ?? null}
+                    drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
+                    isLive={isLive}
+                    highlightDriverNumber={selectedDriverNumber}
+                  />
+                  {renderRaceControlFeed()}
+                </View>
+              )}
+
+            </View>
+
+            {Platform.OS !== 'web' && selectedEntry && (
+              <Modal
+                animationType="slide"
+                transparent={true}
+                visible={modalVisible}
+                onRequestClose={() => setModalVisible(false)}
+              >
+                <View style={styles.modalOverlay}>
+                  <View style={[styles.modalContent, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+                    <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
+                    
+                    <View style={styles.modalHeaderRow}>
+                      <ThemedText type="smallBold" themeColor="text">TELEMETRY & TIMINGS</ThemedText>
+                      <Pressable 
+                        onPress={() => setModalVisible(false)}
+                        style={({ pressed }) => [
+                          styles.modalCloseBtn, 
+                          { backgroundColor: theme.backgroundElement },
+                          pressed && { opacity: 0.7 }
+                        ]}
+                      >
+                        <ThemedText type="code" style={styles.modalCloseBtnText} themeColor="text">CLOSE</ThemedText>
+                      </Pressable>
+                    </View>
+
+                    <ScrollView contentContainerStyle={styles.modalScroll}>
+                      <View style={styles.detailCardGroup}>
+                        <F1Telemetry
+                          driverNumber={selectedEntry.driver_number}
+                          sessionKey={session?.session_key}
+                          driverColor={selectedEntry.driver.team_colour}
+                          session={session}
+                        />
+                        <F1DriverCard
+                          driver={selectedEntry.driver}
+                          sessionKey={session?.session_key}
+                          useLocalTime={useLocalTime}
+                        />
+                      </View>
+                    </ScrollView>
+                  </View>
+                </View>
+              </Modal>
+            )}
+          </>
+        )}
       </ThemedView>
     </ScrollView>
   );
@@ -1147,5 +1469,227 @@ const styles = StyleSheet.create({
   modalScroll: {
     paddingBottom: Spacing.five,
     gap: Spacing.four,
+  },
+  homeDashboard: {
+    gap: Spacing.four,
+    paddingVertical: Spacing.three,
+    alignSelf: 'stretch',
+  },
+  heroCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: Spacing.three,
+    gap: Spacing.two,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
+  },
+  heroHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  liveIndicatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  pulsingLiveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ff1801',
+  },
+  heroBody: {
+    marginTop: Spacing.one,
+  },
+  heroLiveContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: Spacing.three,
+  },
+  heroGPTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  heroLaunchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: 8,
+  },
+  heroLaunchBtnText: {
+    color: '#ffffff',
+    fontSize: 10.5,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  heroOfflineContent: {
+    gap: Spacing.one,
+    position: 'relative',
+  },
+  countdownValue: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  heroGPTitleOffline: {
+    fontSize: 12,
+  },
+  minimalistTrace: {
+    position: 'absolute',
+    right: 0,
+    bottom: -10,
+    width: 120,
+    height: 40,
+  },
+  gridCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.two,
+    gap: Spacing.three,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
+  },
+  gridCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingBottom: Spacing.one,
+  },
+  expandButton: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two,
+    borderRadius: 8,
+    marginTop: Spacing.two,
+  },
+  expandButtonText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  battleSection: {
+    alignSelf: 'stretch',
+  },
+  battleCarousel: {
+    gap: Spacing.three,
+    paddingBottom: Spacing.one,
+  },
+  battleCard: {
+    width: 175,
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: Spacing.three,
+    gap: Spacing.two,
+    position: 'relative',
+    ...cardShadow({ opacity: 0.15, radius: 8, offsetY: 3, elevation: 2 }),
+  },
+  battleTeamAccent: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+  },
+  battleCategory: {
+    fontSize: 8.5,
+    color: '#94a3b8',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  battleRowContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.one,
+  },
+  battleDriverCol: {
+    alignItems: 'flex-start',
+  },
+  battleVs: {
+    fontSize: 9.5,
+    color: '#4b5563',
+    fontWeight: 'bold',
+  },
+  battleDelta: {
+    fontSize: 9.5,
+    fontWeight: 'bold',
+    marginTop: Spacing.one,
+  },
+  filteredFeedCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: Spacing.three,
+    gap: Spacing.two,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
+  },
+  filteredFeedList: {
+    gap: Spacing.two,
+  },
+  filteredFeedItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  filteredFeedTime: {
+    fontSize: 9,
+  },
+  filteredFeedText: {
+    fontSize: 10.5,
+    flex: 1,
+  },
+  consoleLaunchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.three,
+    paddingVertical: Spacing.three,
+    borderRadius: 12,
+    marginTop: Spacing.two,
+    ...cardShadow({ opacity: 0.3, radius: 12, offsetY: 6, elevation: 5 }),
+  },
+  consoleLaunchText: {
+    color: '#ffffff',
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  consoleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: Spacing.two,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.03)',
+    alignSelf: 'stretch',
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: 8,
+  },
+  backBtnText: {
+    fontSize: 9.5,
+    fontWeight: 'bold',
+  },
+  consoleModeLabel: {
+    fontSize: 9.5,
+    letterSpacing: 0.5,
   },
 });

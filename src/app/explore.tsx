@@ -103,7 +103,7 @@ export default function ExploreSessionsScreen() {
       const fetchSessions = async () => {
         try {
           setLoading(true);
-          const data = await apiCache.fetch(
+          const data = await apiCache.fetch<Session[]>(
             'sessions-2026',
             async () => {
               const res = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');

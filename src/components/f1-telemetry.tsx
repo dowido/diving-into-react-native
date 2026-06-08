@@ -1,11 +1,16 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { ActivityIndicator, Animated, Platform, StyleSheet, View } from 'react-native';
-
+import SpeedTrace from './speed-trace';
 import { Spacing } from '@/constants/theme';
 import { cardShadow } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
+
+export interface CarDataFrame {
+  speed: number;
+  [key: string]: any;
+}
 
 interface TelemetryProps {
   driverNumber: number;
@@ -18,6 +23,9 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
   const theme = useTheme();
 
   const [loading, setLoading] = useState(true);
+  const [frames, setFrames] = useState<CarDataFrame[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [containerWidth, setContainerWidth] = useState(280);
   const [telemetry, setTelemetry] = useState({
     speed: 0,
     rpm: 0,
@@ -63,9 +71,13 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
 
         if (data && data.length > 0) {
           telemetryBuffer.current = data;
+          setFrames(data);
           bufferIndex.current = 0;
+          setCurrentIndex(0);
           setLoading(false);
         } else {
+          telemetryBuffer.current = [];
+          setFrames([]);
           setTelemetry({
             speed: 0,
             rpm: 0,
@@ -100,6 +112,7 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
             brake: currentData.brake ?? 0,
             drs: currentData.drs ?? 0,
           });
+          setCurrentIndex(index);
 
           Animated.spring(animatedSpeed, {
             toValue: currentData.speed ?? 0,
@@ -198,6 +211,11 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
           borderColor: theme.backgroundElement 
         }
       ]}
+      onLayout={(e) => {
+        const { width } = e.nativeEvent.layout;
+        // Subtract spacing / padding from layout width
+        setContainerWidth(Math.max(100, width - Spacing.three * 2));
+      }}
     >
       {/* Stripe accent */}
       <View style={[styles.stripe, { backgroundColor: teamColor }]} />
@@ -306,6 +324,22 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
             </View>
           </View>
         </View>
+
+        {/* SPEED TRACE WIDGET (SKIA) */}
+        {frames.length > 0 && (
+          <View style={styles.speedTraceContainer}>
+            <ThemedText type="code" style={styles.speedTraceLabel} themeColor="textSecondary">
+              SPEED TRACE (SKIA)
+            </ThemedText>
+            <SpeedTrace
+              frames={frames}
+              currentIndex={currentIndex}
+              color={teamColor}
+              width={containerWidth}
+              height={55}
+            />
+          </View>
+        )}
       </View>
     </ThemedView>
   );
@@ -506,5 +540,19 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     borderRadius: Spacing.one,
+  },
+  speedTraceContainer: {
+    marginTop: Spacing.three,
+    padding: Spacing.two,
+    backgroundColor: '#020205',
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.03)',
+    gap: Spacing.two,
+  },
+  speedTraceLabel: {
+    fontSize: 8.5,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
 });

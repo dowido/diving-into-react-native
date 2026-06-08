@@ -15,6 +15,8 @@ export default function AppTabs() {
       <NativeTabs.Trigger name="index">
         <NativeTabs.Trigger.Label>Live Timing</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
+          sf="clock.fill"
+          md="timer"
           src={require('@/assets/images/tabIcons/home.png')}
           renderingMode="template"
         />
@@ -23,6 +25,8 @@ export default function AppTabs() {
       <NativeTabs.Trigger name="explore">
         <NativeTabs.Trigger.Label>Sessions</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
+          sf="calendar"
+          md="calendar_today"
           src={require('@/assets/images/tabIcons/explore.png')}
           renderingMode="template"
         />
@@ -31,7 +35,9 @@ export default function AppTabs() {
       <NativeTabs.Trigger name="standings">
         <NativeTabs.Trigger.Label>Standings</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          src={require('@/assets/images/tabIcons/explore.png')}
+          sf="trophy.fill"
+          md="emoji_events"
+          src={require('@/assets/images/tabIcons/standings.png')}
           renderingMode="template"
         />
       </NativeTabs.Trigger>
@@ -39,7 +45,9 @@ export default function AppTabs() {
       <NativeTabs.Trigger name="replay">
         <NativeTabs.Trigger.Label>Replay</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          src={require('@/assets/images/tabIcons/explore.png')}
+          sf="arrow.clockwise.circle.fill"
+          md="history"
+          src={require('@/assets/images/tabIcons/replay.png')}
           renderingMode="template"
         />
       </NativeTabs.Trigger>

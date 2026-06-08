@@ -61,7 +61,7 @@ interface ConstructorStanding {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SEASON = '2025';
+const SEASON = '2026';
 
 const TEAM_COLOURS: Record<string, string> = {
   mclaren: '#FF8000',
