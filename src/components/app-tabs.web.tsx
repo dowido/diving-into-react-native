@@ -27,6 +27,9 @@ export default function AppTabs() {
           <TabTrigger name="explore" href="/explore" asChild>
             <TabButton>Sessions</TabButton>
           </TabTrigger>
+          <TabTrigger name="standings" href="/standings" asChild>
+            <TabButton>Standings</TabButton>
+          </TabTrigger>
           <TabTrigger name="replay" href="/replay" asChild>
             <TabButton>Replay</TabButton>
           </TabTrigger>
@@ -58,7 +61,7 @@ export function CustomTabList(props: TabListProps) {
     <View {...props} style={styles.tabListContainer}>
       <ThemedView type="backgroundElement" style={styles.innerContainer}>
         <ThemedText type="smallBold" style={styles.brandText}>
-          F1 Hub
+          Artello F1
         </ThemedText>
 
         {props.children}

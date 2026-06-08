@@ -1,5 +1,6 @@
+import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -7,7 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-import { cardShadow } from '@/constants/ui-utils';
+import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
 interface Session {
@@ -92,80 +93,93 @@ export default function ExploreSessionsScreen() {
   // Mobile modal state
   const [modalVisible, setModalVisible] = useState(false);
 
-  useEffect(() => {
-    const fetchSessions = async () => {
-      try {
-        setLoading(true);
-        const res = await fetch('https://api.openf1.org/v1/sessions?year=2026');
-        if (!res.ok) throw new Error('Failed to fetch sessions');
-        const data: Session[] = await res.json();
+  // useFocusEffect: Explore tab only loads sessions when first visited,
+  // avoiding simultaneous startup requests from all three tabs.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      const fetchSessions = async () => {
+        try {
+          setLoading(true);
+          const res = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');
+          if (cancelled) return;
+          if (!res.ok) throw new Error('Failed to fetch sessions');
+          const data: Session[] = await res.json();
+          if (cancelled) return;
 
-        if (data && data.length > 0) {
-          const meetingsMap = new Map<number, GroupedMeeting>();
-          data.forEach((s) => {
-            const existing = meetingsMap.get(s.meeting_key);
-            if (existing) {
-              existing.sessions.push(s);
-            } else {
-              meetingsMap.set(s.meeting_key, {
-                meeting_key: s.meeting_key,
-                circuit_short_name: s.circuit_short_name,
-                country_name: s.country_name,
-                location: s.location,
-                gmt_offset: s.gmt_offset,
-                sessions: [s],
-              });
-            }
-          });
+          if (data && data.length > 0) {
+            const meetingsMap = new Map<number, GroupedMeeting>();
+            data.forEach((s) => {
+              const existing = meetingsMap.get(s.meeting_key);
+              if (existing) {
+                existing.sessions.push(s);
+              } else {
+                meetingsMap.set(s.meeting_key, {
+                  meeting_key: s.meeting_key,
+                  circuit_short_name: s.circuit_short_name,
+                  country_name: s.country_name,
+                  location: s.location,
+                  gmt_offset: s.gmt_offset,
+                  sessions: [s],
+                });
+              }
+            });
 
-          // Sort sessions within each meeting chronologically
-          meetingsMap.forEach((m) => {
-            m.sessions.sort((a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime());
-          });
+            // Sort sessions within each meeting chronologically
+            meetingsMap.forEach((m) => {
+              m.sessions.sort((a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime());
+            });
 
-          const allMeetings = Array.from(meetingsMap.values());
-          const now = new Date();
+            const allMeetings = Array.from(meetingsMap.values());
+            const now = new Date();
 
-          // Split into upcoming (race weekend hasn't ended yet) and past
-          const upcoming = allMeetings
-            .filter((m) => {
-              const lastSession = m.sessions[m.sessions.length - 1];
-              const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
-              return endDate >= now;
-            })
-            .sort((a, b) => new Date(a.sessions[0].date_start).getTime() - new Date(b.sessions[0].date_start).getTime());
+            // Split into upcoming (race weekend hasn't ended yet) and past
+            const upcoming = allMeetings
+              .filter((m) => {
+                const lastSession = m.sessions[m.sessions.length - 1];
+                const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
+                return endDate >= now;
+              })
+              .sort((a, b) => new Date(a.sessions[0].date_start).getTime() - new Date(b.sessions[0].date_start).getTime());
 
-          const past = allMeetings
-            .filter((m) => {
-              const lastSession = m.sessions[m.sessions.length - 1];
-              const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
-              return endDate < now;
-            })
-            .sort((a, b) => new Date(b.sessions[0].date_start).getTime() - new Date(a.sessions[0].date_start).getTime());
+            const past = allMeetings
+              .filter((m) => {
+                const lastSession = m.sessions[m.sessions.length - 1];
+                const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
+                return endDate < now;
+              })
+              .sort((a, b) => new Date(b.sessions[0].date_start).getTime() - new Date(a.sessions[0].date_start).getTime());
 
-          // Upcoming races first, past races after
-          const sortedMeetings = [...upcoming, ...past];
+            // Upcoming races first, past races after
+            const sortedMeetings = [...upcoming, ...past];
 
-          setMeetings(sortedMeetings);
+            setMeetings(sortedMeetings);
 
-          // Pre-select the next upcoming race (or most recent past)
-          const defaultMeeting = upcoming.length > 0 ? upcoming[0] : past.length > 0 ? past[0] : null;
-          if (defaultMeeting) {
-            setSelectedMeetingKey(defaultMeeting.meeting_key);
-            if (defaultMeeting.sessions.length > 0) {
-              setSelectedSessionKey(defaultMeeting.sessions[0].session_key);
+            // Pre-select the next upcoming race (or most recent past)
+            const defaultMeeting = upcoming.length > 0 ? upcoming[0] : past.length > 0 ? past[0] : null;
+            if (defaultMeeting) {
+              setSelectedMeetingKey(defaultMeeting.meeting_key);
+              if (defaultMeeting.sessions.length > 0) {
+                setSelectedSessionKey(defaultMeeting.sessions[0].session_key);
+              }
             }
           }
+          if (!cancelled) setLoading(false);
+        } catch (err) {
+          console.warn('Error fetching sessions:', err);
+          if (!cancelled) setLoading(false);
         }
-        setLoading(false);
-      } catch (err) {
-        console.warn('Error fetching sessions:', err);
-        setLoading(false);
-      }
-    };
+      };
 
-    fetchSessions();
-  }, []);
+      // Only fetch if we haven't loaded yet
+      if (meetings.length === 0) {
+        fetchSessions();
+      }
+
+      return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [meetings.length])
+  );
 
   useEffect(() => {
     if (!selectedSessionKey) return;
@@ -174,13 +188,21 @@ export default function ExploreSessionsScreen() {
     const fetchResults = async () => {
       try {
         setResultsLoading(true);
-        const resultsRes = await fetch(
+        const resultsRes = await fetchWithRetry(
           `https://api.openf1.org/v1/session_result?session_key=${selectedSessionKey}`
         );
+        // 404 means results not yet available — show empty gracefully
+        if (resultsRes.status === 404) {
+          if (active) {
+            setSessionResults([]);
+            setResultsLoading(false);
+          }
+          return;
+        }
         if (!resultsRes.ok) throw new Error('Results fetch failed');
         const results: ResultEntry[] = await resultsRes.json();
 
-        const driversRes = await fetch(
+        const driversRes = await fetchWithRetry(
           `https://api.openf1.org/v1/drivers?session_key=${selectedSessionKey}`
         );
         if (!driversRes.ok) throw new Error('Drivers fetch failed');

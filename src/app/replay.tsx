@@ -1,3 +1,4 @@
+import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -12,6 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { CircuitMap } from '@/components/circuit-map';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
@@ -198,38 +200,45 @@ export default function ReplayScreen() {
   const [sessionPickerVisible, setSessionPickerVisible] = useState(false);
   const [driverPickerVisible, setDriverPickerVisible] = useState(false);
 
-  // ── Fetch sessions on mount ───────────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        setSessionsLoading(true);
-        // Fetch past race/quali sessions for last 2 years
-        const [r2026, r2025] = await Promise.all([
-          fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026'),
-          fetchWithRetry('https://api.openf1.org/v1/sessions?year=2025'),
-        ]);
-        const data2026: Session[] = r2026.ok ? await r2026.json() : [];
-        const data2025: Session[] = r2025.ok ? await r2025.json() : [];
+  // ── Fetch sessions on first focus ────────────────────────────────────────
+  // useFocusEffect prevents loading sessions on app startup (before tab is visited).
+  useFocusEffect(
+    useCallback(() => {
+      if (sessions.length > 0) return; // already loaded
+      let cancelled = false;
+      (async () => {
+        try {
+          setSessionsLoading(true);
+          // Fetch past sessions for last 2 years — SEQUENTIAL to avoid burst
+          const r2026 = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');
+          const data2026: Session[] = r2026.ok ? await r2026.json() : [];
 
-        const allSessions = [...data2026, ...data2025];
-        const now = new Date();
+          const r2025 = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2025');
+          const data2025: Session[] = r2025.ok ? await r2025.json() : [];
 
-        // Only include sessions that have ended
-        const past = allSessions
-          .filter((s) => s.date_end && new Date(s.date_end) < now)
-          .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime());
+          if (cancelled) return;
+          const allSessions = [...data2026, ...data2025];
+          const now = new Date();
 
-        setSessions(past);
-        if (past.length > 0) {
-          setSelectedSession(past[0]);
+          // Only include sessions that have ended
+          const past = allSessions
+            .filter((s) => s.date_end && new Date(s.date_end) < now)
+            .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime());
+
+          setSessions(past);
+          if (past.length > 0) {
+            setSelectedSession(past[0]);
+          }
+        } catch (err) {
+          console.warn('Session fetch error:', err);
+        } finally {
+          if (!cancelled) setSessionsLoading(false);
         }
-      } catch (err) {
-        console.warn('Session fetch error:', err);
-      } finally {
-        setSessionsLoading(false);
-      }
-    })();
-  }, []);
+      })();
+      return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sessions.length])
+  );
 
   // ── Fetch drivers when session changes ────────────────────────────────────
   useEffect(() => {
@@ -1150,6 +1159,12 @@ export default function ReplayScreen() {
           <>
             {renderSessionSelector()}
             {renderDriverSelector()}
+            <CircuitMap
+              sessionKey={selectedSession?.session_key ?? null}
+              drivers={new Map(drivers.map((d) => [d.driver_number, { name_acronym: d.name_acronym, team_colour: d.team_colour }]))}
+              replayTimestamp={telemetryData[currentFrame]?.date ?? null}
+              highlightDriverNumber={selectedDriver?.driver_number ?? null}
+            />
             {renderTelemetryCard()}
             {renderSessionPicker()}
             {renderDriverPicker()}
@@ -1163,6 +1178,12 @@ export default function ReplayScreen() {
             <View style={styles.webLeftCol}>
               {renderWebSessionList()}
               {renderWebDriverList()}
+              <CircuitMap
+                sessionKey={selectedSession?.session_key ?? null}
+                drivers={new Map(drivers.map((d) => [d.driver_number, { name_acronym: d.name_acronym, team_colour: d.team_colour }]))}
+                replayTimestamp={telemetryData[currentFrame]?.date ?? null}
+                highlightDriverNumber={selectedDriver?.driver_number ?? null}
+              />
             </View>
 
             {/* Right column: telemetry */}

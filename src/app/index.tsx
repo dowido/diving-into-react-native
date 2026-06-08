@@ -1,14 +1,16 @@
+import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { ActivityIndicator, Animated, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { CircuitMap } from '@/components/circuit-map';
 import { F1DriverCard } from '@/components/f1-driver-card';
 import { F1Telemetry } from '@/components/f1-telemetry';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-import { cardShadow } from '@/constants/ui-utils';
+import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
 interface Driver {
@@ -114,7 +116,7 @@ export default function LiveTimingScreen() {
       if (!isPoll) setLoading(true);
 
       // 1. Fetch latest session metadata
-      const sessionRes = await fetch('https://api.openf1.org/v1/sessions?session_key=latest');
+      const sessionRes = await fetchWithRetry('https://api.openf1.org/v1/sessions?session_key=latest');
       if (!sessionRes.ok) throw new Error('Session fetch failed');
       const sessions = await sessionRes.json();
       if (!sessions || sessions.length === 0) {
@@ -133,46 +135,57 @@ export default function LiveTimingScreen() {
       const sessionIsActive = sEnd ? (now >= sStart && now <= sEnd) : (now >= sStart);
       setIsLive(sessionIsActive);
 
-      // 2. Fetch all drivers for this session
-      const driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${sKey}`);
-      if (!driversRes.ok) throw new Error('Drivers fetch failed');
-      const driversData: Driver[] = await driversRes.json();
+      // 2. Fetch all drivers (graceful — skip if 429/404)
+      let driversData: Driver[] = [];
+      try {
+        const driversRes = await fetchWithRetry(`https://api.openf1.org/v1/drivers?session_key=${sKey}`);
+        if (driversRes.ok) driversData = await driversRes.json();
+      } catch { /* ignore */ }
       const driversMap = new Map<number, Driver>();
       driversData.forEach((d) => driversMap.set(d.driver_number, d));
 
-      // 3. Fetch stints (tyres compound info) for all drivers
-      const stintsRes = await fetch(`https://api.openf1.org/v1/stints?session_key=${sKey}`);
-      if (!stintsRes.ok) throw new Error('Stints fetch failed');
-      const stintsData = await stintsRes.json();
+      // 3. Fetch stints (tyres compound info) — graceful
       const latestStints = new Map<number, string>();
-      if (stintsData && stintsData.length > 0) {
-        const sortedStints = [...stintsData].sort((a, b) => a.lap_start - b.lap_start);
-        sortedStints.forEach((st) => {
-          if (st.compound) {
-            latestStints.set(st.driver_number, st.compound);
+      try {
+        const stintsRes = await fetchWithRetry(`https://api.openf1.org/v1/stints?session_key=${sKey}`);
+        if (stintsRes.ok) {
+          const stintsData = await stintsRes.json();
+          if (stintsData && stintsData.length > 0) {
+            const sortedStints = [...stintsData].sort((a, b) => a.lap_start - b.lap_start);
+            sortedStints.forEach((st: any) => {
+              if (st.compound) latestStints.set(st.driver_number, st.compound);
+            });
           }
-        });
-      }
+        }
+      } catch { /* ignore */ }
 
-      // 4. Fetch session results (standings)
-      const resultsRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${sKey}`);
-      if (!resultsRes.ok) throw new Error('Results fetch failed');
-      const resultsData = await resultsRes.json();
+      // 4. Fetch session results (standings) — graceful
+      let resultsData: any[] = [];
+      try {
+        const resultsRes = await fetchWithRetry(`https://api.openf1.org/v1/session_result?session_key=${sKey}`);
+        if (resultsRes.ok) resultsData = await resultsRes.json();
+      } catch { /* ignore */ }
 
-      // 5. Fetch positions (real-time overlay)
-      const positionsRes = await fetch(`https://api.openf1.org/v1/position?session_key=${sKey}`);
-      if (!positionsRes.ok) throw new Error('Positions fetch failed');
-      const positionsData = await positionsRes.json();
+      // 5. Fetch positions (real-time overlay) — graceful
+      let positionsData: any[] = [];
+      try {
+        const positionsRes = await fetchWithRetry(`https://api.openf1.org/v1/position?session_key=${sKey}`);
+        if (positionsRes.ok) positionsData = await positionsRes.json();
+      } catch { /* ignore */ }
 
-      // 6. Fetch latest intervals
-      const intervalsRes = await fetch(`https://api.openf1.org/v1/intervals?session_key=${sKey}`);
-      if (!intervalsRes.ok) throw new Error('Intervals fetch failed');
-      const intervalsData = await intervalsRes.json();
+      // 6. Fetch latest intervals — graceful
+      let intervalsData: any[] = [];
+      try {
+        const intervalsRes = await fetchWithRetry(`https://api.openf1.org/v1/intervals?session_key=${sKey}`);
+        if (intervalsRes.ok) intervalsData = await intervalsRes.json();
+      } catch { /* ignore */ }
 
-      // 7. Fetch race control feed
-      const rcRes = await fetch(`https://api.openf1.org/v1/race_control?session_key=${sKey}`);
-      if (!rcRes.ok) throw new Error('Race control fetch failed');
-      const rcData = await rcRes.json();
+      // 7. Fetch race control feed — graceful
+      let rcData: any[] = [];
+      try {
+        const rcRes = await fetchWithRetry(`https://api.openf1.org/v1/race_control?session_key=${sKey}`);
+        if (rcRes.ok) rcData = await rcRes.json();
+      } catch { /* ignore */ }
 
       // Build recent messages
       const recentRc = [...rcData]
@@ -297,15 +310,31 @@ export default function LiveTimingScreen() {
     }
   };
 
-  useEffect(() => {
-    fetchData();
+  // useFocusEffect: only start the data fetch + poll when this tab is focused.
+  // This prevents all 3 tabs firing simultaneously on app startup.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      let interval: ReturnType<typeof setInterval>;
 
-    const interval = setInterval(() => {
-      fetchData(true);
-    }, 8000);
+      const run = async () => {
+        await fetchData();
+        if (!active) return;
+        // 30s poll — respectful of OpenF1 rate limits
+        interval = setInterval(() => {
+          if (active) fetchData(true);
+        }, 30000);
+      };
 
-    return () => clearInterval(interval);
-  }, []);
+      run();
+
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+  );
 
   const selectedEntry = leaderboard.find((d) => d.driver_number === selectedDriverNumber);
 
@@ -658,6 +687,14 @@ export default function LiveTimingScreen() {
           {/* TELEMETRY & FEED DETAILS SIDEBAR (ONLY ON WEB) */}
           {Platform.OS === 'web' && selectedEntry && (
             <View style={styles.sidebarContainer}>
+              {/* Circuit Map */}
+              <CircuitMap
+                sessionKey={session?.session_key ?? null}
+                drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
+                isLive={isLive}
+                highlightDriverNumber={selectedDriverNumber}
+              />
+
               <View style={styles.detailCardGroup}>
                 <F1Telemetry
                   driverNumber={selectedEntry.driver_number}
@@ -676,9 +713,15 @@ export default function LiveTimingScreen() {
             </View>
           )}
 
-          {/* ON MOBILE, RENDER THE RACE CONTROL FEED BELOW THE STANDINGS */}
+          {/* ON MOBILE, RENDER CIRCUIT MAP + RACE CONTROL FEED BELOW THE STANDINGS */}
           {Platform.OS !== 'web' && (
             <View style={styles.leaderboardContainer}>
+              <CircuitMap
+                sessionKey={session?.session_key ?? null}
+                drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
+                isLive={isLive}
+                highlightDriverNumber={selectedDriverNumber}
+              />
               {renderRaceControlFeed()}
             </View>
           )}

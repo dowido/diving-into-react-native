@@ -39,23 +39,89 @@ export function cardShadow(opts?: {
   }) as object;
 }
 
+// ─── Global OpenF1 API Request Queue ─────────────────────────────────────────
+//
+// All requests to api.openf1.org share a single semaphore so that only
+// MAX_CONCURRENT requests run at a time, with a MIN_GAP_MS pause between
+// completions. This prevents 429 errors caused by all tabs firing at startup.
+//
+const MAX_CONCURRENT = 1;  // one-at-a-time to be safe with the free tier
+const MIN_GAP_MS = 450;    // minimum ms between releasing the semaphore
+
+let _active = 0;
+const _waiters: Array<() => void> = [];
+
+function _acquire(): Promise<void> {
+  if (_active < MAX_CONCURRENT) {
+    _active++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    _waiters.push(resolve);
+  });
+}
+
+function _release() {
+  setTimeout(() => {
+    if (_waiters.length > 0) {
+      const next = _waiters.shift()!;
+      next(); // active count stays the same — next requester takes the slot
+    } else {
+      _active--;
+    }
+  }, MIN_GAP_MS);
+}
+
 /**
- * Utility: fetch with automatic retry on 429 (rate limit).
- * Waits `retryDelay`ms before each retry.
+ * Throttled fetch for api.openf1.org.
+ *
+ * Routes all requests through a global concurrency semaphore (MAX_CONCURRENT=1,
+ * MIN_GAP_MS=450) so the app never floods the OpenF1 free tier.
+ *
+ * Also retries on 429 with exponential backoff.
+ *
+ * @param url       The full URL to fetch.
+ * @param signal    Optional AbortSignal to cancel the request.
+ * @param maxRetries Number of 429-retry attempts (default 4).
+ * @param baseDelay  Base delay in ms for exponential backoff (default 1500).
  */
 export async function fetchWithRetry(
   url: string,
-  maxRetries = 3,
-  retryDelay = 1200
+  maxRetries = 4,
+  baseDelay = 1500,
+  signal?: AbortSignal
 ): Promise<Response> {
+  // Wait for a slot in the global queue
+  await _acquire();
+
   let lastError: Error = new Error('fetch failed');
-  for (let i = 0; i < maxRetries; i++) {
-    const res = await fetch(url);
-    if (res.status === 429) {
-      await new Promise((r) => setTimeout(r, retryDelay * (i + 1)));
-      continue;
+  try {
+    for (let i = 0; i < maxRetries; i++) {
+      if (signal?.aborted) {
+        const err = new Error('Aborted');
+        (err as any).name = 'AbortError';
+        throw err;
+      }
+      try {
+        const res = await fetch(url, signal ? { signal } : undefined);
+        if (res.status === 429) {
+          const wait = baseDelay * Math.pow(2, i);
+          await new Promise((r) => setTimeout(r, wait));
+          lastError = new Error(`429 Too Many Requests: ${url}`);
+          continue;
+        }
+        return res;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err;
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (i < maxRetries - 1) {
+          await new Promise((r) => setTimeout(r, baseDelay * Math.pow(2, i)));
+        }
+      }
     }
-    return res;
+    throw lastError;
+  } finally {
+    // Always release the slot so the queue keeps moving
+    _release();
   }
-  throw lastError;
 }
