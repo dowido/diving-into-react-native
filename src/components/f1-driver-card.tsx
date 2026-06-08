@@ -4,6 +4,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, View } from 'react-nat
 import * as WebBrowser from 'expo-web-browser';
 
 import { Spacing } from '@/constants/theme';
+import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
@@ -68,22 +69,21 @@ export function F1DriverCard({ driver, sessionKey, useLocalTime = true }: Driver
 
     const fetchDriverData = async () => {
       try {
-        // Fetch laps
-        const lapsPromise = fetch(
+        // Sequential fetches to avoid 429 rate limiting on OpenF1 API
+        const lapsRes = await fetchWithRetry(
           `https://api.openf1.org/v1/laps?session_key=${sessionKey}&driver_number=${driver.driver_number}`
-        ).then(r => r.json());
+        );
+        const lapsData = lapsRes.ok ? await lapsRes.json() : [];
 
-        // Fetch stints
-        const stintsPromise = fetch(
+        const stintsRes = await fetchWithRetry(
           `https://api.openf1.org/v1/stints?session_key=${sessionKey}&driver_number=${driver.driver_number}`
-        ).then(r => r.json());
+        );
+        const stintsData = stintsRes.ok ? await stintsRes.json() : [];
 
-        // Fetch radio
-        const radioPromise = fetch(
+        const radioRes = await fetchWithRetry(
           `https://api.openf1.org/v1/team_radio?session_key=${sessionKey}&driver_number=${driver.driver_number}`
-        ).then(r => r.json());
-
-        const [lapsData, stintsData, radioData] = await Promise.all([lapsPromise, stintsPromise, radioPromise]);
+        );
+        const radioData = radioRes.ok ? await radioRes.json() : [];
 
         if (!active) return;
 
@@ -460,11 +460,7 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
     gap: Spacing.three,
     alignSelf: 'stretch',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 3,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
     position: 'relative',
     overflow: 'hidden',
   },

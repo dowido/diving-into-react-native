@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { cardShadow } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
 interface Session {
@@ -740,11 +741,7 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.three,
     borderWidth: 1,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    elevation: 3,
+    ...cardShadow({ opacity: 0.2, radius: 12, offsetY: 6, elevation: 3 }),
   },
   nextRaceAccent: {
     height: 3,
@@ -847,11 +844,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: Spacing.three,
     gap: Spacing.three,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 3,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
   },
   resultsHeader: {
     flexDirection: 'row',
@@ -975,11 +968,7 @@ const styles = StyleSheet.create({
     maxHeight: '82%',
     padding: Spacing.three,
     gap: Spacing.three,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 10,
+    ...cardShadow({ opacity: 0.3, radius: 12, offsetY: -4, elevation: 10 }),
   },
   modalHandle: {
     width: 40,

@@ -27,6 +27,9 @@ export default function AppTabs() {
           <TabTrigger name="explore" href="/explore" asChild>
             <TabButton>Sessions</TabButton>
           </TabTrigger>
+          <TabTrigger name="replay" href="/replay" asChild>
+            <TabButton>Replay</TabButton>
+          </TabTrigger>
         </CustomTabList>
       </TabList>
     </Tabs>

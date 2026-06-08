@@ -8,6 +8,7 @@ import { F1Telemetry } from '@/components/f1-telemetry';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { cardShadow } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
 interface Driver {
@@ -392,14 +393,15 @@ export default function LiveTimingScreen() {
         { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
       ]}
     >
+      <View style={[styles.cardAccentBar, { backgroundColor: '#ffea00' }]} />
       <View style={styles.sectionHeader}>
         <SymbolView
           name={{ ios: 'bell.badge.fill', android: 'notifications_active', web: 'notifications_active' }}
-          size={14}
+          size={15}
           tintColor={theme.solarAmber}
         />
         <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
-          RACE CONTROL NEWSFEED
+          RACE CONTROL
         </ThemedText>
       </View>
 
@@ -465,14 +467,16 @@ export default function LiveTimingScreen() {
           <ThemedView style={styles.heroSection}>
             <View style={styles.headerRow}>
               <View style={styles.gpDetails}>
+                {/* Red accent bar */}
+                <View style={styles.accentBar} />
                 <ThemedText type="subtitle" style={styles.gpTitle} themeColor="text">
-                  {session.meeting_key === 1286 ? 'MONACO GRAND PRIX' : `${session.location.toUpperCase()} GP`}
+                  {session.location.toUpperCase()} GRAND PRIX
                 </ThemedText>
                 <ThemedText style={styles.gpSubtitle} themeColor="textSecondary">
-                  {session.circuit_short_name} • {session.session_type} • {session.year}
+                  {session.circuit_short_name} · {session.session_type} · {session.year}
                 </ThemedText>
                 <ThemedText type="code" style={styles.sessionTimesHeader} themeColor="textSecondary">
-                  Start: {formatTime(session.date_start)} | End: {formatTime(session.date_end)}
+                  Start: {formatTime(session.date_start)} — End: {formatTime(session.date_end)}
                 </ThemedText>
               </View>
 
@@ -481,17 +485,17 @@ export default function LiveTimingScreen() {
                 onPress={() => setUseLocalTime(!useLocalTime)}
                 style={({ pressed }) => [
                   styles.timeToggleBtn,
-                  { backgroundColor: theme.backgroundElement },
+                  { backgroundColor: theme.backgroundElement, borderColor: useLocalTime ? theme.neonTeal : theme.cosmicIndigo },
                   pressed && { opacity: 0.7 },
                 ]}
               >
                 <SymbolView
                   name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
-                  size={12}
-                  tintColor={theme.cosmicIndigo}
+                  size={13}
+                  tintColor={useLocalTime ? theme.neonTeal : theme.cosmicIndigo}
                 />
-                <ThemedText type="code" style={styles.timeToggleText}>
-                  {useLocalTime ? 'MY LOCATION' : 'TRACK LOCAL'}
+                <ThemedText type="code" style={[styles.timeToggleText, { color: useLocalTime ? theme.neonTeal : theme.cosmicIndigo }]}>
+                  {useLocalTime ? '⊙ MY TIME' : '◎ TRACK TIME'}
                 </ThemedText>
               </Pressable>
             </View>
@@ -500,7 +504,7 @@ export default function LiveTimingScreen() {
             <Animated.View style={[styles.flagBanner, { opacity: flagOpacity, backgroundColor: getFlagColor(trackFlag) }]}>
               <SymbolView
                 name={{ ios: 'flag.fill', android: 'flag', web: 'flag' }}
-                size={14}
+                size={15}
                 tintColor="#000000"
               />
               <ThemedText type="smallBold" style={styles.flagText}>
@@ -527,15 +531,24 @@ export default function LiveTimingScreen() {
                 { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
               ]}
             >
+              {/* Red accent bar at top of card */}
+              <View style={styles.cardAccentBar} />
               <View style={styles.sectionHeader}>
                 <SymbolView
                   name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
-                  size={14}
-                  tintColor={theme.solarAmber}
+                  size={15}
+                  tintColor={theme.cosmicIndigo}
                 />
                 <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
-                  SESSION TIMING STANDINGS
+                  SESSION STANDINGS
                 </ThemedText>
+                {leaderboard.length > 0 && (
+                  <View style={[styles.driverCountBadge, { backgroundColor: theme.backgroundElement }]}>
+                    <ThemedText type="code" style={[styles.driverCountText, { color: theme.textSecondary }]}>
+                      {leaderboard.length} CARS
+                    </ThemedText>
+                  </View>
+                )}
               </View>
 
               <View style={styles.table}>
@@ -758,19 +771,29 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: Spacing.two,
   },
+  accentBar: {
+    width: 36,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#ff1801',
+    marginBottom: Spacing.one,
+  },
   gpDetails: {
     alignItems: 'flex-start',
-    gap: 2,
+    gap: 3,
   },
   gpTitle: {
     fontWeight: 'bold',
     letterSpacing: 1.5,
+    fontSize: 22,
   },
   gpSubtitle: {
     fontSize: 13,
+    letterSpacing: 0.3,
   },
   sessionTimesHeader: {
     fontSize: 10,
+    letterSpacing: 0.2,
   },
   timeToggleBtn: {
     flexDirection: 'row',
@@ -778,27 +801,27 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    borderRadius: Spacing.two,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 20,
+    borderWidth: 1.5,
   },
   timeToggleText: {
-    fontSize: 9.5,
+    fontSize: 10,
     fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
   flagBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.two,
-    paddingVertical: Spacing.two,
+    paddingVertical: Spacing.two + 2,
     paddingHorizontal: Spacing.three,
-    borderRadius: Spacing.two,
+    borderRadius: Spacing.three,
   },
   flagText: {
     color: '#000000',
-    letterSpacing: 0.5,
-    fontSize: 11,
+    letterSpacing: 0.8,
+    fontSize: 12,
     fontWeight: 'bold',
   },
   liveIndicator: {
@@ -843,13 +866,13 @@ const styles = StyleSheet.create({
   sectionCard: {
     borderRadius: Spacing.three,
     borderWidth: 1,
-    padding: Spacing.three,
+    overflow: 'hidden',
     gap: Spacing.three,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 3,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
+  },
+  cardAccentBar: {
+    height: 3,
+    backgroundColor: '#ff1801',
   },
   feedCard: {
     maxHeight: 280,
@@ -858,13 +881,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.three,
   },
   sectionTitle: {
-    fontSize: 10.5,
+    fontSize: 11,
     letterSpacing: 1,
+    flex: 1,
+  },
+  driverCountBadge: {
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  driverCountText: {
+    fontSize: 8,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
   table: {
     alignSelf: 'stretch',
+    paddingHorizontal: Spacing.three,
+    paddingBottom: Spacing.three,
   },
   tableHeader: {
     flexDirection: 'row',
@@ -950,11 +988,13 @@ const styles = StyleSheet.create({
   },
   feedScroll: {
     maxHeight: 200,
+    paddingHorizontal: Spacing.three,
   },
   emptyFeedText: {
     fontSize: 11,
     textAlign: 'center',
     paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.three,
   },
   feedItem: {
     paddingVertical: Spacing.two,
@@ -1007,11 +1047,7 @@ const styles = StyleSheet.create({
     maxHeight: '82%',
     padding: Spacing.three,
     gap: Spacing.three,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 10,
+    ...cardShadow({ opacity: 0.3, radius: 12, offsetY: -4, elevation: 10 }),
   },
   modalHandle: {
     width: 40,

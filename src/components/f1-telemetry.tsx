@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { ActivityIndicator, Animated, Platform, StyleSheet, View } from 'react-native';
 
 import { Spacing } from '@/constants/theme';
+import { cardShadow } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
@@ -162,9 +163,14 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
             styles.led, 
             { 
               backgroundColor: finalColor,
-              shadowColor: finalColor,
-              shadowOpacity: isActive ? 0.8 : 0,
-              shadowRadius: isActive ? 5 : 0,
+              ...Platform.select({
+                web: { boxShadow: isActive ? `0 0 6px ${finalColor}` : 'none' },
+                default: {
+                  shadowColor: finalColor,
+                  shadowOpacity: isActive ? 0.8 : 0,
+                  shadowRadius: isActive ? 5 : 0,
+                },
+              }),
             }
           ]} 
         />
@@ -266,9 +272,10 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
                     backgroundColor: '#22c55e', 
                     height: `${telemetry.throttle}%`,
                     top: `${100 - telemetry.throttle}%`,
-                    shadowColor: '#22c55e',
-                    shadowOpacity: 0.5,
-                    shadowRadius: 5,
+                    ...Platform.select({
+                      web: { boxShadow: '0 0 8px #22c55e' },
+                      default: { shadowColor: '#22c55e', shadowOpacity: 0.5, shadowRadius: 5 },
+                    }),
                   }
                 ]} 
               />
@@ -289,9 +296,10 @@ export function F1Telemetry({ driverNumber, sessionKey, driverColor, session }: 
                     backgroundColor: '#ef4444', 
                     height: `${telemetry.brake}%`,
                     top: `${100 - telemetry.brake}%`,
-                    shadowColor: '#ef4444',
-                    shadowOpacity: 0.5,
-                    shadowRadius: 5,
+                    ...Platform.select({
+                      web: { boxShadow: '0 0 8px #ef4444' },
+                      default: { shadowColor: '#ef4444', shadowOpacity: 0.5, shadowRadius: 5 },
+                    }),
                   }
                 ]} 
               />
@@ -310,11 +318,7 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
     gap: Spacing.three,
     alignSelf: 'stretch',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 3,
+    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
     position: 'relative',
     overflow: 'hidden',
   },
