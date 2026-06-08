@@ -117,22 +117,42 @@ export default function ExploreSessionsScreen() {
             }
           });
 
-          const sortedMeetings = Array.from(meetingsMap.values()).sort((a, b) => {
-            const aDate = new Date(a.sessions[0].date_start).getTime();
-            const bDate = new Date(b.sessions[0].date_start).getTime();
-            return bDate - aDate;
-          });
-
-          sortedMeetings.forEach((m) => {
+          // Sort sessions within each meeting chronologically
+          meetingsMap.forEach((m) => {
             m.sessions.sort((a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime());
           });
 
+          const allMeetings = Array.from(meetingsMap.values());
+          const now = new Date();
+
+          // Split into upcoming (race weekend hasn't ended yet) and past
+          const upcoming = allMeetings
+            .filter((m) => {
+              const lastSession = m.sessions[m.sessions.length - 1];
+              const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
+              return endDate >= now;
+            })
+            .sort((a, b) => new Date(a.sessions[0].date_start).getTime() - new Date(b.sessions[0].date_start).getTime());
+
+          const past = allMeetings
+            .filter((m) => {
+              const lastSession = m.sessions[m.sessions.length - 1];
+              const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
+              return endDate < now;
+            })
+            .sort((a, b) => new Date(b.sessions[0].date_start).getTime() - new Date(a.sessions[0].date_start).getTime());
+
+          // Upcoming races first, past races after
+          const sortedMeetings = [...upcoming, ...past];
+
           setMeetings(sortedMeetings);
 
-          if (sortedMeetings.length > 0) {
-            setSelectedMeetingKey(sortedMeetings[0].meeting_key);
-            if (sortedMeetings[0].sessions.length > 0) {
-              setSelectedSessionKey(sortedMeetings[0].sessions[0].session_key);
+          // Pre-select the next upcoming race (or most recent past)
+          const defaultMeeting = upcoming.length > 0 ? upcoming[0] : past.length > 0 ? past[0] : null;
+          if (defaultMeeting) {
+            setSelectedMeetingKey(defaultMeeting.meeting_key);
+            if (defaultMeeting.sessions.length > 0) {
+              setSelectedSessionKey(defaultMeeting.sessions[0].session_key);
             }
           }
         }
@@ -204,6 +224,26 @@ export default function ExploreSessionsScreen() {
 
   const selectedMeeting = meetings.find((m) => m.meeting_key === selectedMeetingKey);
   const selectedSession = selectedMeeting?.sessions.find((s) => s.session_key === selectedSessionKey);
+
+  // Helper to determine if a meeting is upcoming
+  const isMeetingUpcoming = (meeting: GroupedMeeting) => {
+    const lastSession = meeting.sessions[meeting.sessions.length - 1];
+    const endDate = lastSession.date_end ? new Date(lastSession.date_end) : new Date(lastSession.date_start);
+    return endDate >= new Date();
+  };
+
+  // Helper to determine if a meeting is the very next race
+  const isNextRace = meetings.length > 0 && isMeetingUpcoming(meetings[0]) ? meetings[0].meeting_key : null;
+
+  // Round number (index in the full sorted list + 1)
+  const getMeetingRound = (meeting_key: number) => {
+    // Sort all meetings chronologically to get round number
+    const allChronological = [...meetings].sort((a, b) =>
+      new Date(a.sessions[0].date_start).getTime() - new Date(b.sessions[0].date_start).getTime()
+    );
+    const idx = allChronological.findIndex((m) => m.meeting_key === meeting_key);
+    return idx >= 0 ? idx + 1 : null;
+  };
 
   const formatLapTime = (time: number | null) => {
     if (!time) return '--:--';
@@ -318,6 +358,12 @@ export default function ExploreSessionsScreen() {
     );
   };
 
+  // Compute whether any upcoming meetings exist for section divider
+  const hasUpcoming = meetings.some(isMeetingUpcoming);
+  const hasPast = meetings.some((m) => !isMeetingUpcoming(m));
+  let renderedUpcomingDivider = false;
+  let renderedPastDivider = false;
+
   return (
     <ScrollView
       style={[styles.scrollView, { backgroundColor: theme.background }]}
@@ -329,9 +375,11 @@ export default function ExploreSessionsScreen() {
         <ThemedView style={styles.titleContainer}>
           <View style={styles.headerRow}>
             <View style={styles.headerTitles}>
-              <ThemedText type="subtitle" style={styles.titleText}>F1 SESSIONS CALENDAR</ThemedText>
+              {/* Red accent bar */}
+              <View style={styles.accentBar} />
+              <ThemedText type="subtitle" style={styles.titleText}>RACE CALENDAR 2026</ThemedText>
               <ThemedText style={styles.subtitleText} themeColor="textSecondary">
-                Browse Grand Prix weekends of the championship and inspect final timings.
+                {meetings.filter(isMeetingUpcoming).length} races remaining · tap a session to view results
               </ThemedText>
             </View>
 
@@ -340,17 +388,17 @@ export default function ExploreSessionsScreen() {
               onPress={() => setUseLocalTime(!useLocalTime)}
               style={({ pressed }) => [
                 styles.timeToggleBtn,
-                { backgroundColor: theme.backgroundElement },
+                { backgroundColor: theme.backgroundElement, borderColor: useLocalTime ? theme.neonTeal : theme.cosmicIndigo },
                 pressed && { opacity: 0.7 },
               ]}
             >
               <SymbolView
                 name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
-                size={12}
-                tintColor={theme.cosmicIndigo}
+                size={13}
+                tintColor={useLocalTime ? theme.neonTeal : theme.cosmicIndigo}
               />
-              <ThemedText type="code" style={styles.timeToggleText}>
-                {useLocalTime ? 'MY LOCATION' : 'TRACK LOCAL'}
+              <ThemedText type="code" style={[styles.timeToggleText, { color: useLocalTime ? theme.neonTeal : theme.cosmicIndigo }]}>
+                {useLocalTime ? '⊙ MY TIME' : '◎ TRACK TIME'}
               </ThemedText>
             </Pressable>
           </View>
@@ -363,82 +411,145 @@ export default function ExploreSessionsScreen() {
           <View style={styles.meetingsCol}>
             {meetings.map((meeting) => {
               const isSelectedMeeting = meeting.meeting_key === selectedMeetingKey;
-              return (
-                <ThemedView
-                  key={meeting.meeting_key}
-                  style={[
-                    styles.gpCard,
-                    {
-                      backgroundColor: theme.cardBackground,
-                      borderColor: isSelectedMeeting ? theme.neonTeal : theme.backgroundElement,
-                    },
-                  ]}>
-                  
-                  {/* GP Header */}
-                  <Pressable 
-                    onPress={() => {
-                      setSelectedMeetingKey(meeting.meeting_key);
-                      if (meeting.sessions.length > 0) {
-                        setSelectedSessionKey(meeting.sessions[0].session_key);
-                      }
-                    }}
-                    style={styles.gpCardHeader}
-                  >
-                    <View style={styles.gpMeta}>
-                      <ThemedText type="smallBold" style={styles.gpMeetingTitle}>
-                        {meeting.location.toUpperCase()} GRAND PRIX
-                      </ThemedText>
-                      <ThemedText type="code" style={styles.gpCircuitName} themeColor="textSecondary">
-                        {meeting.circuit_short_name} • {meeting.country_name}
-                      </ThemedText>
-                    </View>
-                    <SymbolView
-                      name={isSelectedMeeting ? { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' } : { ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
-                      size={14}
-                      tintColor={theme.textSecondary}
-                    />
-                  </Pressable>
+              const upcoming = isMeetingUpcoming(meeting);
+              const isNext = meeting.meeting_key === isNextRace;
+              const round = getMeetingRound(meeting.meeting_key);
 
-                  {/* Sessions details lists */}
-                  {isSelectedMeeting && (
-                    <View style={[styles.sessionsList, { borderTopColor: theme.backgroundElement }]}>
-                      {meeting.sessions.map((sess) => {
-                        const isSelectedSess = sess.session_key === selectedSessionKey;
-                        return (
-                          <Pressable
-                            key={sess.session_key}
-                            onPress={() => {
-                              setSelectedSessionKey(sess.session_key);
-                              if (Platform.OS !== 'web') {
-                                setModalVisible(true);
-                              }
-                            }}
-                            style={({ pressed }) => [
-                              styles.sessionItem,
-                              isSelectedSess && [styles.sessionItemActive, { backgroundColor: theme.backgroundSelected }],
-                              pressed && { opacity: 0.8 },
-                            ]}
-                          >
-                            <View style={styles.sessionStatusCol}>
-                              <ThemedText type="code" style={[styles.sessionName, isSelectedSess && { color: theme.neonTeal }]} themeColor="text">
-                                {sess.session_name}
-                              </ThemedText>
-                              <ThemedText type="code" style={styles.sessionTime} themeColor="textSecondary">
-                                {formatTime(sess.date_start, meeting.gmt_offset)}
+              // Section dividers
+              let upcomingDivider = null;
+              let pastDivider = null;
+              if (upcoming && !renderedUpcomingDivider) {
+                renderedUpcomingDivider = true;
+                upcomingDivider = (
+                  <View key="divider-upcoming" style={styles.sectionDivider}>
+                    <View style={[styles.dividerLine, { backgroundColor: theme.neonTeal }]} />
+                    <ThemedText type="code" style={[styles.dividerLabel, { color: theme.neonTeal }]}>UPCOMING</ThemedText>
+                    <View style={[styles.dividerLine, { backgroundColor: theme.neonTeal }]} />
+                  </View>
+                );
+              } else if (!upcoming && !renderedPastDivider && hasPast && hasUpcoming) {
+                renderedPastDivider = true;
+                pastDivider = (
+                  <View key="divider-past" style={styles.sectionDivider}>
+                    <View style={[styles.dividerLine, { backgroundColor: theme.backgroundElement }]} />
+                    <ThemedText type="code" style={[styles.dividerLabel, { color: theme.textSecondary }]}>COMPLETED</ThemedText>
+                    <View style={[styles.dividerLine, { backgroundColor: theme.backgroundElement }]} />
+                  </View>
+                );
+              }
+
+              return (
+                <React.Fragment key={meeting.meeting_key}>
+                  {upcomingDivider}
+                  {pastDivider}
+                  <ThemedView
+                    style={[
+                      styles.gpCard,
+                      {
+                        backgroundColor: isNext ? 'rgba(255,24,1,0.06)' : (upcoming ? 'rgba(0,229,255,0.04)' : theme.cardBackground),
+                        borderColor: isNext ? theme.cosmicIndigo : (isSelectedMeeting ? theme.neonTeal : theme.backgroundElement),
+                        borderWidth: isNext || isSelectedMeeting ? 1.5 : 1,
+                        opacity: upcoming ? 1 : 0.75,
+                      },
+                    ]}>
+
+                    {/* NEXT RACE top accent bar */}
+                    {isNext && <View style={[styles.nextRaceAccent, { backgroundColor: theme.cosmicIndigo }]} />}
+
+                    {/* GP Header */}
+                    <Pressable 
+                      onPress={() => {
+                        setSelectedMeetingKey(meeting.meeting_key);
+                        if (meeting.sessions.length > 0) {
+                          setSelectedSessionKey(meeting.sessions[0].session_key);
+                        }
+                      }}
+                      style={styles.gpCardHeader}
+                    >
+                      <View style={styles.gpMeta}>
+                        <View style={styles.gpTitleRow}>
+                          {round !== null && (
+                            <View style={[styles.roundBadge, { backgroundColor: isNext ? theme.cosmicIndigo : theme.backgroundElement }]}>
+                              <ThemedText type="code" style={[styles.roundText, { color: isNext ? '#fff' : theme.textSecondary }]}>
+                                R{round}
                               </ThemedText>
                             </View>
-                            <SymbolView
-                              name={{ ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
-                              size={12}
-                              tintColor={isSelectedSess ? theme.neonTeal : theme.backgroundElement}
-                            />
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  )}
+                          )}
+                          <ThemedText type="smallBold" style={[styles.gpMeetingTitle, isNext && { color: theme.cosmicIndigo }]}>
+                            {meeting.location.toUpperCase()} GP
+                          </ThemedText>
+                          {isNext && (
+                            <View style={[styles.nextBadge, { backgroundColor: theme.cosmicIndigo }]}>
+                              <ThemedText type="code" style={styles.nextBadgeText}>NEXT</ThemedText>
+                            </View>
+                          )}
+                          {!upcoming && (
+                            <View style={[styles.doneBadge, { backgroundColor: theme.backgroundElement }]}>
+                              <ThemedText type="code" style={[styles.doneBadgeText, { color: theme.textSecondary }]}>DONE</ThemedText>
+                            </View>
+                          )}
+                        </View>
+                        <ThemedText type="code" style={styles.gpCircuitName} themeColor="textSecondary">
+                          {meeting.circuit_short_name} · {meeting.country_name}
+                        </ThemedText>
+                        {/* Weekend start date */}
+                        <ThemedText type="code" style={styles.gpDateText} themeColor="textSecondary">
+                          {formatTime(meeting.sessions[0].date_start, meeting.gmt_offset)}
+                        </ThemedText>
+                      </View>
+                      <SymbolView
+                        name={isSelectedMeeting ? { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' } : { ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
+                        size={14}
+                        tintColor={isSelectedMeeting ? theme.neonTeal : theme.textSecondary}
+                      />
+                    </Pressable>
 
-                </ThemedView>
+                    {/* Sessions details lists */}
+                    {isSelectedMeeting && (
+                      <View style={[styles.sessionsList, { borderTopColor: theme.backgroundElement }]}>
+                        {meeting.sessions.map((sess) => {
+                          const isSelectedSess = sess.session_key === selectedSessionKey;
+                          const sessDate = new Date(sess.date_start);
+                          const isPastSess = sessDate < new Date();
+                          return (
+                            <Pressable
+                              key={sess.session_key}
+                              onPress={() => {
+                                setSelectedSessionKey(sess.session_key);
+                                if (Platform.OS !== 'web') {
+                                  setModalVisible(true);
+                                }
+                              }}
+                              style={({ pressed }) => [
+                                styles.sessionItem,
+                                isSelectedSess && [styles.sessionItemActive, { backgroundColor: theme.backgroundSelected }],
+                                pressed && { opacity: 0.8 },
+                              ]}
+                            >
+                              <View style={styles.sessionStatusCol}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  <View style={[styles.sessStatusDot, { backgroundColor: isPastSess ? theme.textSecondary : theme.neonTeal }]} />
+                                  <ThemedText type="code" style={[styles.sessionName, isSelectedSess && { color: theme.neonTeal }]} themeColor="text">
+                                    {sess.session_name}
+                                  </ThemedText>
+                                </View>
+                                <ThemedText type="code" style={styles.sessionTime} themeColor="textSecondary">
+                                  {formatTime(sess.date_start, meeting.gmt_offset)}
+                                </ThemedText>
+                              </View>
+                              <SymbolView
+                                name={{ ios: 'chevron.forward', android: 'navigate_next', web: 'navigate_next' }}
+                                size={12}
+                                tintColor={isSelectedSess ? theme.neonTeal : theme.backgroundElement}
+                              />
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    )}
+
+                  </ThemedView>
+                </React.Fragment>
               );
             })}
           </View>
@@ -560,17 +671,26 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   headerTitles: {
-    gap: Spacing.one,
+    gap: Spacing.two,
     flex: 1,
     minWidth: 280,
   },
+  accentBar: {
+    width: 36,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#ff1801',
+    marginBottom: 2,
+  },
   titleText: {
     fontWeight: 'bold',
-    letterSpacing: 1.5,
+    letterSpacing: 2,
+    fontSize: 20,
   },
   subtitleText: {
-    fontSize: 13,
+    fontSize: 12,
     lineHeight: 18,
+    letterSpacing: 0.3,
   },
   timeToggleBtn: {
     flexDirection: 'row',
@@ -578,13 +698,28 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    borderRadius: Spacing.two,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 20,
+    borderWidth: 1.5,
   },
   timeToggleText: {
-    fontSize: 9.5,
+    fontSize: 10,
     fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  sectionDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginVertical: Spacing.two,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerLabel: {
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1.5,
   },
   contentLayout: {
     flexDirection: 'row',
@@ -595,7 +730,7 @@ const styles = StyleSheet.create({
   meetingsCol: {
     flex: 1,
     minWidth: 320,
-    gap: Spacing.three,
+    gap: Spacing.two,
   },
   resultsCol: {
     flex: 1.2,
@@ -606,26 +741,80 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  nextRaceAccent: {
+    height: 3,
+    width: '100%',
   },
   gpCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: Spacing.three,
+    gap: Spacing.two,
   },
   gpMeta: {
-    gap: 2,
+    gap: 4,
+    flex: 1,
+  },
+  gpTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  roundBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  roundText: {
+    fontSize: 8,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  nextBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  nextBadgeText: {
+    fontSize: 8,
+    fontWeight: 'bold',
+    color: '#ffffff',
+    letterSpacing: 0.8,
+  },
+  doneBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  doneBadgeText: {
+    fontSize: 8,
+    letterSpacing: 0.5,
   },
   gpMeetingTitle: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
   gpCircuitName: {
-    fontSize: 9.5,
+    fontSize: 10,
+    letterSpacing: 0.3,
+  },
+  gpDateText: {
+    fontSize: 9,
+    letterSpacing: 0.2,
+    marginTop: 1,
+  },
+  sessStatusDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
   },
   sessionsList: {
     borderTopWidth: 1,
