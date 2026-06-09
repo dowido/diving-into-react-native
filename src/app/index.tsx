@@ -852,7 +852,7 @@ export default function LiveTimingScreen() {
     setShowFull(p => !p);
   }, []);
 
-  const visibleLeaderboard = leaderboard.slice(0, showFull ? 20 : 5);
+  const visibleLeaderboard = leaderboard.slice(0, showFull ? 22 : 5);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 

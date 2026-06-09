@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 
 /**
@@ -72,6 +73,57 @@ function _release() {
   }, MIN_GAP_MS);
 }
 
+// ─── Offline State Manager ───────────────────────────────────────────────────
+
+let _isOffline = false;
+const _offlineListeners = new Set<(offline: boolean) => void>();
+
+export function getOfflineState() {
+  return _isOffline;
+}
+
+export function setOfflineState(offline: boolean) {
+  if (_isOffline !== offline) {
+    _isOffline = offline;
+    _offlineListeners.forEach((listener) => listener(offline));
+  }
+}
+
+export function subscribeToOfflineState(listener: (offline: boolean) => void) {
+  _offlineListeners.add(listener);
+  return () => {
+    _offlineListeners.delete(listener);
+  };
+}
+
+export function useOfflineState() {
+  const [offline, setOffline] = useState(_isOffline);
+
+  useEffect(() => {
+    setOffline(_isOffline);
+    return subscribeToOfflineState(setOffline);
+  }, []);
+
+  return offline;
+}
+
+export async function checkConnectivity(): Promise<boolean> {
+  try {
+    const res = await fetch('https://api.openf1.org/v1/sessions?year=2026');
+    setOfflineState(false);
+    return true;
+  } catch (e) {
+    setOfflineState(true);
+    return false;
+  }
+}
+
+if (Platform.OS === 'web' && typeof window !== 'undefined') {
+  _isOffline = !window.navigator.onLine;
+  window.addEventListener('online', () => setOfflineState(false));
+  window.addEventListener('offline', () => setOfflineState(true));
+}
+
 /**
  * Throttled fetch for api.openf1.org.
  *
@@ -104,6 +156,7 @@ export async function fetchWithRetry(
       }
       try {
         const res = await fetch(url, signal ? { signal } : undefined);
+        setOfflineState(false); // Succeeded, so we are online!
         if (res.status === 429) {
           const wait = baseDelay * Math.pow(2, i);
           await new Promise((r) => setTimeout(r, wait));
@@ -113,6 +166,18 @@ export async function fetchWithRetry(
         return res;
       } catch (err: any) {
         if (err?.name === 'AbortError') throw err;
+        
+        // Treat fetch connection failures as offline
+        const errStr = String(err).toLowerCase();
+        const isNetworkError = errStr.includes('network') || 
+                               errStr.includes('failed to fetch') ||
+                               errStr.includes('dns') ||
+                               errStr.includes('load failed') ||
+                               errStr.includes('typeerror');
+        if (isNetworkError) {
+          setOfflineState(true);
+        }
+        
         lastError = err instanceof Error ? err : new Error(String(err));
         if (i < maxRetries - 1) {
           await new Promise((r) => setTimeout(r, baseDelay * Math.pow(2, i)));
