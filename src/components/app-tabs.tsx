@@ -5,28 +5,29 @@ import { Colors } from '@/constants/theme';
 
 export default function AppTabs() {
   const scheme = useColorScheme();
-  const colors = Colors[scheme === 'unspecified' ? 'light' : scheme];
+  const colors = Colors[scheme === 'unspecified' ? 'light' : (scheme ?? 'dark')];
 
   return (
     <NativeTabs
       backgroundColor={colors.background}
-      indicatorColor={colors.backgroundElement}
-      labelStyle={{ selected: { color: colors.text } }}>
+      indicatorColor={colors.primary}
+      labelStyle={{ selected: { color: colors.text } }}
+    >
       <NativeTabs.Trigger name="index">
         <NativeTabs.Trigger.Label>Live Timing</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          sf="clock.fill"
+          sf="timer"
           md="timer"
           src={require('@/assets/images/tabIcons/home.png')}
           renderingMode="template"
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="explore">
-        <NativeTabs.Trigger.Label>Sessions</NativeTabs.Trigger.Label>
+      <NativeTabs.Trigger name="pitwall">
+        <NativeTabs.Trigger.Label>Pit Wall</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          sf="calendar"
-          md="calendar_today"
+          sf="chart.line.uptrend.xyaxis"
+          md="monitor"
           src={require('@/assets/images/tabIcons/explore.png')}
           renderingMode="template"
         />

@@ -1,41 +1,98 @@
-import { useFocusEffect } from 'expo-router';
-import { SymbolView } from 'expo-symbols';
-import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { ActivityIndicator, Animated, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+/**
+ * Live Timing — Adaptive Home / Landing Hub
+ *
+ * M3 Expressive design implementing three sections:
+ *
+ * A  State-Aware Hero Card (XL, 28dp corners)
+ *    - LIVE: red pulsating pip + GP name + "Enter Pit Wall" CTA
+ *    - No-Race: monospace countdown clock + weather matrix backdrop
+ *
+ * B  Collapsible Top 5 Grid
+ *    - Position · Team accent strip · Driver · Compound badge · Gap
+ *    - Strictly shows P1–P5; "View full 20-car grid" expands inline
+ *
+ * C  Battle Tracker Carousel
+ *    - Horizontal M3 12dp card deck
+ *    - Head-to-head gaps for intra-team & cross-team rivalries
+ *    - Tap → navigate to Pit Wall telemetry with drivers pre-selected
+ */
 
-import { CircuitMap } from '@/components/circuit-map';
-import { WeatherPanel } from '@/components/weather-panel';
-import { F1DriverCard } from '@/components/f1-driver-card';
-import { F1Telemetry } from '@/components/f1-telemetry';
+import { router, useFocusEffect } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import {
+  ActivityIndicator,
+  LayoutAnimation,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
+
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { WebBadge } from '@/components/web-badge';
+import {
+  BottomTabInset,
+  M3Motion,
+  M3Shape,
+  MaxContentWidth,
+  Spacing,
+} from '@/constants/theme';
 import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
+import { apiCache, TTL } from '@/utils/api-cache';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Session {
+  session_key: number;
+  session_name: string;
+  session_type: string;
+  date_start: string;
+  date_end: string | null;
+  circuit_short_name: string;
+  country_name: string;
+  location: string;
+  year: number;
+  meeting_key: number;
+  gmt_offset?: string;
+}
 
 interface Driver {
   driver_number: number;
-  broadcast_name: string;
-  full_name: string;
   name_acronym: string;
+  full_name: string;
   team_name: string;
   team_colour: string;
-  headshot_url: string;
-  last_name: string;
+  headshot_url?: string;
 }
 
 interface LeaderboardEntry {
-  position:       number | null;
-  driver_number:  number;
-  driver:         Driver;
-  gap_to_leader:  number | string | null;
-  interval:       number | string | null;
-  number_of_laps: number;
-  dnf:            boolean;
-  dns:            boolean;
-  compound?:      string;
-  stint_age?:     number;   // laps on current tyre
+  position: number | null;
+  driver_number: number;
+  driver?: Driver;
+  gap_to_leader: number | string | null;
+  interval: number | string | null;
+  compound?: string;
+  stint_age?: number;
+  number_of_laps?: number;
+  dnf?: boolean;
 }
 
 interface RaceControlMessage {
@@ -44,6 +101,570 @@ interface RaceControlMessage {
   flag: string | null;
   lap_number: number | null;
 }
+
+interface BattlePair {
+  driverA: string;
+  driverB: string;
+  teamA: string;
+  teamB: string;
+  colorA: string;
+  colorB: string;
+  gap: string;
+  label: string;
+  numA: number;
+  numB: number;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// 2025 static rivalry pairs (update per-weekend)
+const BATTLE_PAIRS: BattlePair[] = [
+  { driverA: 'NOR', driverB: 'PIA', teamA: 'McLaren', teamB: 'McLaren',
+    colorA: '#FF8000', colorB: '#FF8000', gap: '+16 PTS', label: 'PAPAYA DUEL', numA: 4, numB: 81 },
+  { driverA: 'LEC', driverB: 'HAM', teamA: 'Ferrari', teamB: 'Ferrari',
+    colorA: '#E8002D', colorB: '#E8002D', gap: '+26 PTS', label: 'SCUDERIA DELTA', numA: 16, numB: 44 },
+  { driverA: 'RUS', driverB: 'ANT', teamA: 'Mercedes', teamB: 'Mercedes',
+    colorA: '#27F4D2', colorB: '#27F4D2', gap: '+2 PTS', label: 'SILVER ARROWS', numA: 63, numB: 12 },
+];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function isLiveSession(s: Session | null): boolean {
+  if (!s) return false;
+  const now = new Date();
+  const start = new Date(s.date_start);
+  const end = s.date_end ? new Date(s.date_end) : null;
+  return now >= start && (!end || now <= end);
+}
+
+function nextSessionCountdown(s: Session | null): string {
+  if (!s) return '--:--:--';
+  const diff = new Date(s.date_start).getTime() - Date.now();
+  if (diff <= 0) return '00:00:00';
+  const d = Math.floor(diff / 86400000);
+  const h = Math.floor((diff % 86400000) / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  const sec = Math.floor((diff % 60000) / 1000);
+  if (d > 0) return `${d}d ${h.toString().padStart(2, '0')}h ${m.toString().padStart(2, '0')}m`;
+  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+
+function compoundColor(compound?: string): string {
+  switch (compound?.toUpperCase()) {
+    case 'SOFT':   return '#ef4444';
+    case 'MEDIUM': return '#eab308';
+    case 'HARD':   return '#e2e8f0';
+    case 'INTERMEDIATE': return '#22c55e';
+    case 'WET':    return '#3b82f6';
+    default:       return '#94a3b8';
+  }
+}
+
+function compoundAbbrev(compound?: string): string {
+  switch (compound?.toUpperCase()) {
+    case 'SOFT':   return 'S';
+    case 'MEDIUM': return 'M';
+    case 'HARD':   return 'H';
+    case 'INTERMEDIATE': return 'I';
+    case 'WET':    return 'W';
+    default:       return '?';
+  }
+}
+
+function teamColorHex(colour?: string): string {
+  if (!colour) return '#94a3b8';
+  return colour.startsWith('#') ? colour : `#${colour}`;
+}
+
+function formatGap(gap: number | string | null, position: number | null): string {
+  if (position === 1) return 'LEADER';
+  if (gap == null) return '—';
+  if (typeof gap === 'string') return gap.startsWith('+') ? gap : `+${gap}`;
+  if (gap <= 0) return 'LEADER';
+  return `+${gap.toFixed(3)}s`;
+}
+
+// ─── Live Pip (pulsating red dot) ─────────────────────────────────────────────
+
+function LivePip() {
+  const scale = useSharedValue(1);
+
+  useEffect(() => {
+    scale.value = withRepeat(
+      withSequence(
+        withTiming(1.4, { duration: 700, easing: Easing.bezier(0.4, 0, 0.6, 1) }),
+        withTiming(1.0, { duration: 700, easing: Easing.bezier(0.4, 0, 0.6, 1) }),
+      ),
+      -1,
+      false
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    opacity: 1,
+  }));
+
+  return (
+    <Animated.View style={[pipStyles.pip, style]} />
+  );
+}
+
+const pipStyles = StyleSheet.create({
+  pip: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    backgroundColor: '#E10600',
+  },
+});
+
+// ─── Hero Card ────────────────────────────────────────────────────────────────
+
+function HeroCard({
+  session,
+  isLive,
+  countdown,
+  raceControl,
+}: {
+  session: Session | null;
+  isLive: boolean;
+  countdown: string;
+  raceControl: RaceControlMessage[];
+}) {
+  const theme = useTheme();
+
+  const lastFlag = raceControl[0]?.flag ?? null;
+
+  return (
+    <View style={[heroStyles.card, { backgroundColor: theme.surfaceVariant, borderColor: theme.outline }]}>
+      {/* Top accent line */}
+      <View style={heroStyles.accentLine} />
+
+      <View style={heroStyles.inner}>
+        {isLive ? (
+          /* ── Live state ── */
+          <>
+            <View style={heroStyles.liveRow}>
+              <LivePip />
+              <ThemedText style={heroStyles.liveLabel}>LIVE</ThemedText>
+              {lastFlag && (
+                <View style={[heroStyles.flagPill, { backgroundColor: getFlagBg(lastFlag) }]}>
+                  <ThemedText style={[heroStyles.flagText, { color: getFlagText(lastFlag) }]}>
+                    {lastFlag} FLAG
+                  </ThemedText>
+                </View>
+              )}
+            </View>
+
+            {session && (
+              <ThemedText style={heroStyles.eventName}>
+                {session.location.toUpperCase()} {session.year} — {session.session_name.toUpperCase()}
+              </ThemedText>
+            )}
+
+            <Pressable
+              onPress={() => router.push('/pitwall')}
+              style={({ pressed }) => [
+                heroStyles.ctaButton,
+                { backgroundColor: '#E10600' },
+                pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <SymbolView
+                name={{ ios: 'chart.line.uptrend.xyaxis', android: 'monitor', web: 'monitor' }}
+                size={16}
+                tintColor="#fff"
+              />
+              <ThemedText style={heroStyles.ctaText}>ENTER PIT WALL HUB</ThemedText>
+            </Pressable>
+          </>
+        ) : (
+          /* ── No-race state ── */
+          <>
+            <ThemedText style={heroStyles.nextLabel} themeColor="textSecondary">NEXT SESSION</ThemedText>
+
+            {session && (
+              <ThemedText style={heroStyles.nextEvent}>
+                {session.location.toUpperCase()} GP · {session.session_name}
+              </ThemedText>
+            )}
+
+            {/* Monospace countdown — Display Medium scale */}
+            <View style={heroStyles.countdownBlock}>
+              <ThemedText style={heroStyles.countdown}>{countdown}</ThemedText>
+              <ThemedText style={heroStyles.countdownSub} themeColor="textSecondary">
+                {session ? `until ${session.session_name}` : 'UNTIL LIGHTS OUT'}
+              </ThemedText>
+            </View>
+
+            {/* Weather matrix (ambient) */}
+            <View style={heroStyles.weatherMatrix}>
+              {['FP1', 'FP2', 'FP3', 'QUALI', 'RACE'].map((s) => (
+                <View key={s} style={[heroStyles.weatherCell, { backgroundColor: theme.background }]}>
+                  <ThemedText style={heroStyles.weatherLabel} themeColor="textSecondary">{s}</ThemedText>
+                  <ThemedText style={heroStyles.weatherIcon}>☁️</ThemedText>
+                  <ThemedText style={heroStyles.weatherTemp} themeColor="textSecondary">—°C</ThemedText>
+                </View>
+              ))}
+            </View>
+          </>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function getFlagBg(flag: string | null): string {
+  switch (flag?.toUpperCase()) {
+    case 'GREEN':  return '#22c55e20';
+    case 'YELLOW': return '#eab30820';
+    case 'RED':    return '#ef444420';
+    case 'SC': case 'VSC': return '#f9731620';
+    default: return '#ffffff10';
+  }
+}
+
+function getFlagText(flag: string | null): string {
+  switch (flag?.toUpperCase()) {
+    case 'GREEN':  return '#22c55e';
+    case 'YELLOW': return '#eab308';
+    case 'RED':    return '#ef4444';
+    case 'SC': case 'VSC': return '#f97316';
+    default: return '#94a3b8';
+  }
+}
+
+const heroStyles = StyleSheet.create({
+  card: {
+    borderRadius: M3Shape.xl,
+    borderWidth: 1,
+    overflow: 'hidden',
+    ...Platform.select({
+      web: { boxShadow: '0 8px 32px rgba(0,0,0,0.35)' } as any,
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.3,
+        shadowRadius: 20,
+        elevation: 8,
+      },
+    }),
+  },
+  accentLine: {
+    height: 3,
+    backgroundColor: '#E10600',
+  },
+  inner: {
+    padding: Spacing.four,
+    gap: Spacing.three,
+  },
+  // Live state
+  liveRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  liveLabel: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 2,
+    color: '#E10600',
+  },
+  flagPill: {
+    borderRadius: M3Shape.xs,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    marginLeft: 'auto' as any,
+  },
+  flagText: {
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  eventName: {
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 1,
+    lineHeight: 22,
+  },
+  ctaButton: {
+    borderRadius: M3Shape.md,
+    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.four,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginTop: Spacing.one,
+  },
+  ctaText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+  },
+  // No-race state
+  nextLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 2,
+  },
+  nextEvent: {
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    lineHeight: 22,
+  },
+  countdownBlock: {
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: Spacing.two,
+  },
+  countdown: {
+    fontSize: 46,
+    fontWeight: '900',
+    letterSpacing: 4,
+    fontVariant: ['tabular-nums'] as any,
+    color: '#E10600',
+    lineHeight: 54,
+    textAlign: 'center',
+  },
+  countdownSub: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 2,
+    textAlign: 'center',
+  },
+  weatherMatrix: {
+    flexDirection: 'row',
+    gap: Spacing.one,
+    flexWrap: 'wrap',
+  },
+  weatherCell: {
+    flex: 1,
+    minWidth: 48,
+    borderRadius: M3Shape.sm,
+    padding: Spacing.two,
+    alignItems: 'center',
+    gap: 2,
+  },
+  weatherLabel: { fontSize: 7, fontWeight: '700', letterSpacing: 0.5 },
+  weatherIcon: { fontSize: 14 },
+  weatherTemp: { fontSize: 8, fontWeight: '600' },
+});
+
+// ─── Leaderboard Row ──────────────────────────────────────────────────────────
+
+function LeaderboardRow({ entry, idx }: { entry: LeaderboardEntry; idx: number }) {
+  const theme = useTheme();
+  const pos = entry.position ?? idx + 1;
+  const color = teamColorHex(entry.driver?.team_colour);
+  const isTop3 = pos <= 3;
+
+  return (
+    <View style={[
+      lbStyles.row,
+      {
+        backgroundColor: isTop3 ? color + '12' : theme.surfaceVariant,
+        borderColor: isTop3 ? color + '60' : theme.outline,
+      },
+    ]}>
+      {/* Team color accent strip */}
+      <View style={[lbStyles.teamStrip, { backgroundColor: color }]} />
+
+      {/* Position */}
+      <View style={[lbStyles.posBadge, { backgroundColor: isTop3 ? color : theme.background }]}>
+        <ThemedText style={[lbStyles.posText, { color: isTop3 ? '#000' : theme.textSecondary }]}>
+          {pos}
+        </ThemedText>
+      </View>
+
+      {/* Driver */}
+      <View style={lbStyles.driverBlock}>
+        <ThemedText style={[lbStyles.acronym, { color: isTop3 ? color : theme.text }]}>
+          {entry.driver?.name_acronym ?? `#${entry.driver_number}`}
+        </ThemedText>
+        <ThemedText style={lbStyles.teamName} themeColor="textSecondary" numberOfLines={1}>
+          {entry.driver?.team_name ?? '—'}
+        </ThemedText>
+      </View>
+
+      {/* Compound badge */}
+      <View style={[lbStyles.compBadge, {
+        backgroundColor: compoundColor(entry.compound) + '25',
+        borderColor: compoundColor(entry.compound),
+      }]}>
+        <ThemedText style={[lbStyles.compText, { color: compoundColor(entry.compound) }]}>
+          {compoundAbbrev(entry.compound)}
+        </ThemedText>
+      </View>
+
+      {/* Gap */}
+      <ThemedText style={lbStyles.gap} themeColor="textSecondary">
+        {entry.dnf ? 'DNF' : formatGap(entry.gap_to_leader, entry.position)}
+      </ThemedText>
+    </View>
+  );
+}
+
+const lbStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: M3Shape.md,
+    borderWidth: 1,
+    overflow: 'hidden',
+    height: 48,
+    gap: Spacing.two,
+  },
+  teamStrip: {
+    width: 3,
+    alignSelf: 'stretch',
+    flexShrink: 0,
+  },
+  posBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: M3Shape.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: Spacing.one,
+    flexShrink: 0,
+  },
+  posText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  driverBlock: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  acronym: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  teamName: {
+    fontSize: 9,
+    letterSpacing: 0.2,
+    lineHeight: 12,
+  },
+  compBadge: {
+    borderRadius: M3Shape.xs,
+    borderWidth: 1.5,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    flexShrink: 0,
+  },
+  compText: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  gap: {
+    fontSize: 10,
+    fontWeight: '600',
+    width: 64,
+    textAlign: 'right',
+    paddingRight: Spacing.two,
+    fontVariant: ['tabular-nums'] as any,
+  },
+});
+
+// ─── Battle Card ──────────────────────────────────────────────────────────────
+
+function BattleCard({ pair }: { pair: BattlePair }) {
+  const theme = useTheme();
+
+  return (
+    <Pressable
+      onPress={() => router.push('/pitwall')}
+      style={({ pressed }) => [
+        battleStyles.card,
+        {
+          backgroundColor: theme.surfaceVariant,
+          borderColor: theme.outline,
+        },
+        pressed && { transform: [{ scale: 0.97 }], opacity: 0.85 },
+      ]}
+    >
+      {/* Label */}
+      <ThemedText style={battleStyles.label} themeColor="textSecondary">{pair.label}</ThemedText>
+
+      {/* Driver acronyms */}
+      <View style={battleStyles.driverRow}>
+        <ThemedText style={[battleStyles.acronym, { color: pair.colorA }]}>{pair.driverA}</ThemedText>
+        <ThemedText style={battleStyles.vs} themeColor="textSecondary">vs</ThemedText>
+        <ThemedText style={[battleStyles.acronym, { color: pair.colorB }]}>{pair.driverB}</ThemedText>
+      </View>
+
+      {/* Gap */}
+      <View style={battleStyles.gapRow}>
+        <ThemedText style={battleStyles.gap}>{pair.gap}</ThemedText>
+        <ThemedText style={battleStyles.tapHint} themeColor="textSecondary">TAP FOR TELEMETRY →</ThemedText>
+      </View>
+    </Pressable>
+  );
+}
+
+const battleStyles = StyleSheet.create({
+  card: {
+    borderRadius: M3Shape.md,
+    borderWidth: 1,
+    padding: Spacing.three,
+    gap: Spacing.two,
+    width: 180,
+    ...Platform.select({
+      web: { boxShadow: '0 4px 16px rgba(0,0,0,0.2)' } as any,
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.2,
+        shadowRadius: 8,
+        elevation: 3,
+      },
+    }),
+  },
+  label: {
+    fontSize: 7.5,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+  },
+  driverRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  acronym: {
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: 1,
+  },
+  vs: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+  gapRow: {
+    gap: 3,
+  },
+  gap: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#E10600',
+    letterSpacing: 0.5,
+  },
+  tapHint: {
+    fontSize: 7,
+    fontWeight: '600',
+    letterSpacing: 0.8,
+  },
+});
+
+// ─── Main Screen ──────────────────────────────────────────────────────────────
 
 export default function LiveTimingScreen() {
   const safeAreaInsets = useSafeAreaInsets();
@@ -56,1081 +677,311 @@ export default function LiveTimingScreen() {
 
   const contentPlatformStyle = Platform.select({
     android: {
-      paddingTop: insets.top,
+      paddingTop: insets.top + Spacing.three,
       paddingLeft: insets.left,
       paddingRight: insets.right,
       paddingBottom: insets.bottom,
     },
     ios: {
-      paddingTop: insets.top,
+      paddingTop: insets.top + Spacing.three,
       paddingLeft: insets.left,
       paddingRight: insets.right,
       paddingBottom: insets.bottom,
     },
     web: {
-      paddingTop: Spacing.five,
+      paddingTop: 72,
       paddingBottom: Spacing.four,
     },
   });
 
+  // ── State ──────────────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<'home' | 'console'>('home');
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [isLive, setIsLive] = useState(false);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [raceControl, setRaceControl] = useState<RaceControlMessage[]>([]);
-  const [trackFlag, setTrackFlag] = useState<string>('GREEN');
-  const [selectedDriverNumber, setSelectedDriverNumber] = useState<number | null>(null);
-  const [isLive, setIsLive] = useState(false);
+  const [showFull, setShowFull] = useState(false);
+  const [countdown, setCountdown] = useState('--:--:--');
 
-  // Timezone toggle state
-  const [useLocalTime, setUseLocalTime] = useState(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Mobile Bottom Sheet Modal Visibility
-  const [modalVisible, setModalVisible] = useState(false);
-
-  // Home Screen States
-  const [showFullStandings, setShowFullStandings] = useState(false);
-  const [countdownText, setCountdownText] = useState('');
-
-  // Animated flag opacity for warning flashers
-  const flagOpacity = useRef(new Animated.Value(1)).current;
-
-  // Pulse track status banner if safety car, yellow, or red flags are active
-  useEffect(() => {
-    if (trackFlag !== 'GREEN' && trackFlag !== 'CLEAR') {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(flagOpacity, {
-            toValue: 0.4,
-            duration: 800,
-            useNativeDriver: false,
-          }),
-          Animated.timing(flagOpacity, {
-            toValue: 1.0,
-            duration: 800,
-            useNativeDriver: false,
-          }),
-        ])
-      ).start();
-    } else {
-      flagOpacity.stopAnimation();
-      flagOpacity.setValue(1.0);
-    }
-  }, [trackFlag]);
-
-  // Dynamic countdown timer for upcoming session
+  // ── Countdown ticker ───────────────────────────────────────────────────────
   useEffect(() => {
     if (!session || isLive) return;
-    const interval = setInterval(() => {
-      const now = new Date().getTime();
-      const start = new Date(session.date_start).getTime();
-      const diff = start - now;
-      if (diff <= 0) {
-        setCountdownText('SESSION COMPLETED');
-        clearInterval(interval);
-      } else {
-        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-        setCountdownText(
-          `${days.toString().padStart(2, '0')}d : ${hours.toString().padStart(2, '0')}h : ${minutes
-            .toString()
-            .padStart(2, '0')}m : ${seconds.toString().padStart(2, '0')}s`
-        );
-      }
-    }, 1000);
-    return () => clearInterval(interval);
+
+    const tick = () => setCountdown(nextSessionCountdown(session));
+    tick();
+    countdownRef.current = setInterval(tick, 1000);
+    return () => { if (countdownRef.current) clearInterval(countdownRef.current); };
   }, [session, isLive]);
 
-  const fetchData = async (isPoll = false) => {
+  // ── Data fetch ─────────────────────────────────────────────────────────────
+  const fetchData = useCallback(async () => {
     try {
-      if (!isPoll) setLoading(true);
+      const currentYear = new Date().getFullYear();
+      // Resolve active/upcoming session
+      const sessionRes = await fetchWithRetry(
+        `https://api.openf1.org/v1/sessions?year=${currentYear}`,
+        3
+      );
+      if (!sessionRes.ok) throw new Error('Sessions fetch failed');
+      const sessions: Session[] = await sessionRes.json();
 
-      // 1. Fetch latest session metadata
-      const sessionRes = await fetchWithRetry('https://api.openf1.org/v1/sessions?session_key=latest');
-      if (!sessionRes.ok) throw new Error('Session fetch failed');
-      const sessions = await sessionRes.json();
-      if (!sessions || sessions.length === 0) {
-        setLoading(false);
-        return;
-      }
-      const activeSession = sessions[0];
-      setSession(activeSession);
-
-      const sKey = activeSession.session_key;
-
-      // Check if session is currently active
       const now = new Date();
-      const sStart = new Date(activeSession.date_start);
-      const sEnd = activeSession.date_end ? new Date(activeSession.date_end) : null;
-      const sessionIsActive = sEnd ? (now >= sStart && now <= sEnd) : (now >= sStart);
-      setIsLive(sessionIsActive);
+      // Active session: started and not yet ended
+      const active = sessions.find(s => {
+        const start = new Date(s.date_start);
+        const end = s.date_end ? new Date(s.date_end) : null;
+        return now >= start && (!end || now <= end);
+      });
+      // Next upcoming session
+      const upcoming = sessions
+        .filter(s => new Date(s.date_start) > now)
+        .sort((a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime())[0] ?? null;
 
-      // 2. Fetch all drivers (graceful — skip if 429/404)
-      let driversData: Driver[] = [];
-      try {
-        const driversRes = await fetchWithRetry(`https://api.openf1.org/v1/drivers?session_key=${sKey}`);
-        if (driversRes.ok) driversData = await driversRes.json();
-      } catch { /* ignore */ }
-      const driversMap = new Map<number, Driver>();
-      driversData.forEach((d) => driversMap.set(d.driver_number, d));
+      // Most recent past session
+      const recent = sessions
+        .filter(s => s.date_end && new Date(s.date_end) < now)
+        .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime())[0] ?? null;
 
-      // 3. Fetch stints (tyres compound info + age) — graceful
-      const latestStints   = new Map<number, string>();
-      const latestStintAge = new Map<number, number>();  // laps on current tyre
-      try {
-        const stintsRes = await fetchWithRetry(`https://api.openf1.org/v1/stints?session_key=${sKey}`);
-        if (stintsRes.ok) {
-          const stintsData = await stintsRes.json();
-          if (stintsData && stintsData.length > 0) {
-            const sortedStints = [...stintsData].sort((a: any, b: any) => a.lap_start - b.lap_start);
-            const latestStintMap = new Map<number, any>();
-            sortedStints.forEach((st: any) => {
-              if (st.compound) latestStints.set(st.driver_number, st.compound);
-              latestStintMap.set(st.driver_number, st);
-            });
-            const maxLap = Math.max(...sortedStints.map((s: any) => s.lap_end ?? s.lap_start));
-            latestStintMap.forEach((st, num) => {
-              latestStintAge.set(num, maxLap - st.lap_start + 1);
-            });
+      // Most recent past Race session for previous results post-mortem
+      const recentRace = sessions
+        .filter(s => s.session_type === 'Race' && s.date_end && new Date(s.date_end) < now)
+        .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime())[0] ?? null;
+
+      const current = active ?? upcoming ?? recent;
+      setSession(current);
+      const live = !!active;
+      setIsLive(live);
+
+      if (!current) { setLoading(false); return; }
+
+      // Fetch leaderboard from active session if live, or recentRace if not live
+      const sk = live ? current.session_key : (recentRace?.session_key ?? current.session_key);
+
+      const [posRes, driverRes, rcRes, resultsRes] = await Promise.allSettled([
+        live ? fetchWithRetry(`https://api.openf1.org/v1/position?session_key=${sk}`, 2) : Promise.resolve(null),
+        fetchWithRetry(`https://api.openf1.org/v1/drivers?session_key=${sk}`, 2),
+        fetchWithRetry(`https://api.openf1.org/v1/race_control?session_key=${sk}`, 2),
+        !live ? fetchWithRetry(`https://api.openf1.org/v1/session_result?session_key=${sk}`, 2) : Promise.resolve(null),
+      ]);
+
+      let positions: { driver_number: number; position: number | null; gap_to_leader: number | string | null; dnf?: boolean }[] = [];
+
+      if (live) {
+        if (posRes.status === 'fulfilled' && posRes.value && posRes.value.ok) {
+          const raw = await posRes.value.json();
+          // Latest per driver
+          const latest = new Map<number, { driver_number: number; position: number; date: string }>();
+          for (const p of raw) {
+            const ex = latest.get(p.driver_number);
+            if (!ex || p.date > ex.date) latest.set(p.driver_number, p);
           }
-        }
-      } catch { /* ignore */ }
-
-      // 4. Fetch session results (standings) — graceful
-      let resultsData: any[] = [];
-      try {
-        const resultsRes = await fetchWithRetry(`https://api.openf1.org/v1/session_result?session_key=${sKey}`);
-        if (resultsRes.ok) resultsData = await resultsRes.json();
-      } catch { /* ignore */ }
-
-      // 5. Fetch positions (real-time overlay) — graceful
-      let positionsData: any[] = [];
-      try {
-        const positionsRes = await fetchWithRetry(`https://api.openf1.org/v1/position?session_key=${sKey}`);
-        if (positionsRes.ok) positionsData = await positionsRes.json();
-      } catch { /* ignore */ }
-
-      // 6. Fetch latest intervals — graceful
-      let intervalsData: any[] = [];
-      try {
-        const intervalsRes = await fetchWithRetry(`https://api.openf1.org/v1/intervals?session_key=${sKey}`);
-        if (intervalsRes.ok) intervalsData = await intervalsRes.json();
-      } catch { /* ignore */ }
-
-      // 7. Fetch race control feed — graceful
-      let rcData: any[] = [];
-      try {
-        const rcRes = await fetchWithRetry(`https://api.openf1.org/v1/race_control?session_key=${sKey}`);
-        if (rcRes.ok) rcData = await rcRes.json();
-      } catch { /* ignore */ }
-
-      // Build recent messages
-      const recentRc = [...rcData]
-        .reverse()
-        .slice(0, 10)
-        .map((msg: any) => ({
-          date: msg.date,
-          message: msg.message,
-          flag: msg.flag,
-          lap_number: msg.lap_number,
-        }));
-      setRaceControl(recentRc);
-
-      // Calculate track flag state from recent flags
-      const flagMsgs = rcData.filter((msg: any) => msg.category === 'Flag');
-      if (flagMsgs.length > 0) {
-        const latestFlag = flagMsgs[flagMsgs.length - 1].flag;
-        setTrackFlag(latestFlag || 'GREEN');
-      } else {
-        setTrackFlag('GREEN');
-      }
-
-      // Map current state:
-      if (resultsData && resultsData.length > 0) {
-        const mappedResults: LeaderboardEntry[] = resultsData.map((res: any) => {
-          const drv = driversMap.get(res.driver_number) || {
-            driver_number: res.driver_number,
-            broadcast_name: `CAR ${res.driver_number}`,
-            full_name: `Car Number ${res.driver_number}`,
-            name_acronym: `${res.driver_number}`,
-            team_name: 'Unknown Team',
-            team_colour: '999999',
-            headshot_url: '',
-            last_name: `CAR ${res.driver_number}`,
-          };
-
-          return {
-            position:       res.position,
-            driver_number:  res.driver_number,
-            driver:         drv,
-            gap_to_leader:  res.gap_to_leader !== null && res.gap_to_leader !== undefined 
-              ? (typeof res.gap_to_leader === 'number' ? `+${res.gap_to_leader.toFixed(3)}s` : res.gap_to_leader)
-              : (res.position === 1 ? 'LEADER' : '--'),
-            interval:       res.position === 1 ? 'LEADER' : '--',
-            number_of_laps: res.number_of_laps || 0,
-            dnf:            !!res.dnf,
-            dns:            !!res.dns,
-            compound:       latestStints.get(res.driver_number),
-            stint_age:      latestStintAge.get(res.driver_number),
-          };
-        });
-        
-        mappedResults.sort((a, b) => {
-          if (a.position === null) return 1;
-          if (b.position === null) return -1;
-          return a.position - b.position;
-        });
-
-        setLeaderboard(mappedResults);
-        if (!selectedDriverNumber && mappedResults.length > 0) {
-          setSelectedDriverNumber(mappedResults[0].driver_number);
+          positions = Array.from(latest.values())
+            .sort((a, b) => a.position - b.position)
+            .map(p => ({
+              driver_number: p.driver_number,
+              position: p.position,
+              gap_to_leader: null,
+            }));
         }
       } else {
-        // Fallback for live sessions
-        const latestPositions = new Map<number, { position: number; date: string }>();
-        positionsData.forEach((pos: any) => {
-          const current = latestPositions.get(pos.driver_number);
-          if (!current || new Date(pos.date) > new Date(current.date)) {
-            latestPositions.set(pos.driver_number, { position: pos.position, date: pos.date });
-          }
-        });
-
-        const latestIntervals = new Map<number, { gap: number | string | null; interval: number | string | null; date: string }>();
-        intervalsData.forEach((int: any) => {
-          const current = latestIntervals.get(int.driver_number);
-          if (!current || new Date(int.date) > new Date(current.date)) {
-            latestIntervals.set(int.driver_number, {
-              gap: int.gap_to_leader,
-              interval: int.interval,
-              date: int.date,
+        if (resultsRes.status === 'fulfilled' && resultsRes.value && resultsRes.value.ok) {
+          const raw = await resultsRes.value.json();
+          positions = raw
+            .map((r: any) => ({
+              driver_number: r.driver_number,
+              position: r.position,
+              gap_to_leader: r.gap_to_leader,
+              dnf: r.dnf,
+            }))
+            .sort((a: any, b: any) => {
+              if (a.position === null || a.position === undefined) return 1;
+              if (b.position === null || b.position === undefined) return -1;
+              return a.position - b.position;
             });
-          }
-        });
-
-        const liveLeaderboard: LeaderboardEntry[] = [];
-        driversData.forEach((drv) => {
-          const posState = latestPositions.get(drv.driver_number);
-          const intState = latestIntervals.get(drv.driver_number);
-
-          const totalLaps = rcData
-            .filter((m: any) => m.driver_number === drv.driver_number && m.lap_number)
-            .reduce((max: number, m: any) => Math.max(max, m.lap_number), 0);
-
-          liveLeaderboard.push({
-            position: posState ? posState.position : null,
-            driver_number: drv.driver_number,
-            driver: drv,
-            gap_to_leader: posState?.position === 1 ? 'LEADER' : (intState?.gap !== null && intState?.gap !== undefined ? `+${intState.gap}s` : '--'),
-            interval: posState?.position === 1 ? 'LEADER' : (intState?.interval !== null && intState?.interval !== undefined ? `+${intState.interval}s` : '--'),
-            number_of_laps: totalLaps,
-            dnf: false,
-            dns: false,
-            compound: latestStints.get(drv.driver_number),
-          });
-        });
-
-        liveLeaderboard.sort((a, b) => {
-          if (a.position === null) return 1;
-          if (b.position === null) return -1;
-          return a.position - b.position;
-        });
-
-        setLeaderboard(liveLeaderboard);
-        if (!selectedDriverNumber && liveLeaderboard.length > 0) {
-          setSelectedDriverNumber(liveLeaderboard[0].driver_number);
         }
       }
 
-      if (!isPoll) setLoading(false);
+      let driversMap = new Map<number, Driver>();
+      if (driverRes.status === 'fulfilled' && driverRes.value && driverRes.value.ok) {
+        const raw: Driver[] = await driverRes.value.json();
+        raw.forEach(d => driversMap.set(d.driver_number, d));
+      }
+
+      const board: LeaderboardEntry[] = positions.map((p, i) => ({
+        position: p.position,
+        driver_number: p.driver_number,
+        driver: driversMap.get(p.driver_number),
+        gap_to_leader: p.gap_to_leader,
+        interval: null,
+        compound: undefined,
+        dnf: p.dnf,
+      }));
+      setLeaderboard(board);
+
+      // Race control
+      if (rcRes.status === 'fulfilled' && rcRes.value && rcRes.value.ok) {
+        const rcData: RaceControlMessage[] = await rcRes.value.json();
+        setRaceControl(rcData.slice(-5).reverse());
+      }
     } catch (err) {
-      console.warn('Dashboard Fetch Error:', err);
-      if (!isPoll) setLoading(false);
+      console.warn('Home fetch error:', err);
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
-  // useFocusEffect: only start the data fetch + poll when this tab is focused.
-  // This prevents all 3 tabs firing simultaneously on app startup.
+  // ── Focus polling ──────────────────────────────────────────────────────────
   useFocusEffect(
     useCallback(() => {
-      let active = true;
-      let interval: ReturnType<typeof setInterval>;
-
-      const run = async () => {
-        await fetchData();
-        if (!active) return;
-        // 30s poll — respectful of OpenF1 rate limits
-        interval = setInterval(() => {
-          if (active) fetchData(true);
-        }, 30000);
-      };
-
-      run();
-
+      fetchData();
+      pollRef.current = setInterval(fetchData, 30000);
       return () => {
-        active = false;
-        clearInterval(interval);
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
+    }, [fetchData])
   );
 
-  const selectedEntry = leaderboard.find((d) => d.driver_number === selectedDriverNumber);
-
-  // Status/Flag styling maps
-  const getFlagColor = (flag: string) => {
-    switch (flag.toUpperCase()) {
-      case 'YELLOW':
-      case 'DOUBLE YELLOW':
-        return '#f59e0b';
-      case 'RED':
-        return '#ef4444';
-      case 'SAFETY CAR':
-      case 'VIRTUAL SAFETY CAR':
-        return '#fb923c';
-      case 'BLUE':
-        return '#3b82f6';
-      case 'GREEN':
-      default:
-        return '#22c55e';
+  // ── Toggle expand ──────────────────────────────────────────────────────────
+  const toggleShowFull = useCallback(() => {
+    if (Platform.OS !== 'web') {
+      LayoutAnimation.easeInEaseOut();
     }
-  };
+    setShowFull(p => !p);
+  }, []);
 
-  const getFlagLabel = (flag: string) => {
-    if (flag === 'CLEAR') return 'GREEN FLAG - TRACK CLEAR';
-    if (flag === 'DOUBLE YELLOW') return 'DOUBLE YELLOW - REDUCE SPEED';
-    return `${flag.toUpperCase()} FLAG`;
-  };
+  const visibleLeaderboard = leaderboard.slice(0, showFull ? 20 : 5);
 
-  const getTyreColor = (comp: string) => {
-    switch (comp.toUpperCase()) {
-      case 'SOFT':
-        return '#ef4444';
-      case 'MEDIUM':
-        return '#eab308';
-      case 'HARD':
-        return '#ffffff';
-      case 'INTERMEDIATE':
-        return '#22c55e';
-      case 'WET':
-        return '#3b82f6';
-      default:
-        return '#94a3b8';
-    }
-  };
-
-  const getTyreLabel = (comp: string) => {
-    switch (comp.toUpperCase()) {
-      case 'SOFT':
-        return 'S';
-      case 'MEDIUM':
-        return 'M';
-      case 'HARD':
-        return 'H';
-      case 'INTERMEDIATE':
-        return 'I';
-      case 'WET':
-        return 'W';
-      default:
-        return '?';
-    }
-  };
-
-  // Format date-time helper based on timezone offset toggler
-  const formatTime = (dateStr: string, gmtOffsetStr?: string) => {
-    const date = new Date(dateStr);
-    if (useLocalTime) {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    } else {
-      const offset = gmtOffsetStr || session?.gmt_offset || '00:00:00';
-      const parts = offset.split(':');
-      const offsetMs = (parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + (parseInt(parts[2]) || 0)) * 1000;
-      const trackDate = new Date(date.getTime() + offsetMs);
-      const hours = trackDate.getUTCHours().toString().padStart(2, '0');
-      const minutes = trackDate.getUTCMinutes().toString().padStart(2, '0');
-      const seconds = trackDate.getUTCSeconds().toString().padStart(2, '0');
-      return `${hours}:${minutes}:${seconds}`;
-    }
-  };
-
-  const renderRaceControlFeed = () => (
-    <ThemedView 
-      style={[
-        styles.sectionCard, 
-        styles.feedCard,
-        { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
-      ]}
-    >
-      <View style={[styles.cardAccentBar, { backgroundColor: '#ffea00' }]} />
-      <View style={styles.sectionHeader}>
-        <SymbolView
-          name={{ ios: 'bell.badge.fill', android: 'notifications_active', web: 'notifications_active' }}
-          size={15}
-          tintColor={theme.solarAmber}
-        />
-        <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
-          RACE CONTROL
-        </ThemedText>
-      </View>
-
-      <ScrollView style={styles.feedScroll} nestedScrollEnabled>
-        {raceControl.length === 0 ? (
-          <ThemedText type="code" style={styles.emptyFeedText} themeColor="textSecondary">
-            No race control status logged.
-          </ThemedText>
-        ) : (
-          raceControl.map((msg, i) => (
-            <View 
-              key={i} 
-              style={[
-                styles.feedItem, 
-                { borderBottomColor: 'rgba(128,128,128,0.06)' }
-              ]}
-            >
-              <View style={styles.feedMeta}>
-                <ThemedText type="code" style={styles.feedTimestamp} themeColor="textSecondary">
-                  [{formatTime(msg.date)}]
-                </ThemedText>
-                {msg.lap_number && (
-                  <View style={[styles.lapBadge, { backgroundColor: theme.backgroundElement }]}>
-                    <ThemedText type="code" style={styles.lapBadgeText}>LAP {msg.lap_number}</ThemedText>
-                  </View>
-                )}
-                {msg.flag && (
-                  <View style={[styles.feedFlagBadge, { backgroundColor: getFlagColor(msg.flag) }]}>
-                    <ThemedText type="code" style={styles.feedFlagText}>{msg.flag}</ThemedText>
-                  </View>
-                )}
-              </View>
-              <ThemedText type="code" style={styles.feedText} themeColor="text">
-                {msg.message}
-              </ThemedText>
-            </View>
-          ))
-        )}
-      </ScrollView>
-    </ThemedView>
-  );
-
-  if (loading) {
-    return (
-      <ThemedView type="backgroundElement" style={styles.loadingWrapper}>
-        <ActivityIndicator size="large" color={theme.cosmicIndigo} />
-        <ThemedText type="code" themeColor="textSecondary">
-          Loading Grand Prix Dashboard...
-        </ThemedText>
-      </ThemedView>
-    );
-  }
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <ScrollView
-      style={[styles.scrollView, { backgroundColor: theme.background }]}
-      contentInset={insets}
-      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
+      style={[styles.scroll, { backgroundColor: theme.background }]}
+      contentContainerStyle={[styles.content, contentPlatformStyle]}
+      showsVerticalScrollIndicator={false}
+    >
       <ThemedView style={styles.container}>
 
-        {viewMode === 'home' ? (
-          <View style={styles.homeDashboard}>
-            {/* Section 1: The Context Hero (Adaptable) */}
-            <ThemedView
-              style={[
-                styles.heroCard,
-                { backgroundColor: theme.cardBackground, borderColor: isLive ? theme.cosmicIndigo : theme.backgroundElement }
-              ]}
-            >
-              <View style={styles.heroHeaderRow}>
-                {isLive ? (
-                  <View style={styles.liveIndicatorRow}>
-                    <View style={styles.pulsingLiveDot} />
-                    <ThemedText type="smallBold" style={{ color: theme.cosmicIndigo, letterSpacing: 1 }}>
-                      LIVE: {session?.location?.toUpperCase()} GRAND PRIX
-                    </ThemedText>
-                  </View>
-                ) : (
-                  <ThemedText type="smallBold" themeColor="textSecondary" style={{ letterSpacing: 1 }}>
-                    UPCOMING: {session?.location?.toUpperCase()} GP
-                  </ThemedText>
-                )}
-              </View>
-
-              <View style={styles.heroBody}>
-                {isLive ? (
-                  <View style={styles.heroLiveContent}>
-                    <ThemedText style={styles.heroGPTitle} themeColor="text">
-                      {session?.circuit_short_name} · {session?.session_type}
-                    </ThemedText>
-                    <Pressable
-                      onPress={() => setViewMode('console')}
-                      style={({ pressed }) => [
-                        styles.heroLaunchBtn,
-                        { backgroundColor: theme.cosmicIndigo },
-                        pressed && { opacity: 0.9 }
-                      ]}
-                    >
-                      <SymbolView
-                        name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
-                        size={14}
-                        tintColor="#ffffff"
-                      />
-                      <ThemedText style={styles.heroLaunchBtnText}>JOIN LIVE PIT WALL STREAM</ThemedText>
-                    </Pressable>
-                  </View>
-                ) : (
-                  <View style={styles.heroOfflineContent}>
-                    <ThemedText style={styles.countdownValue} themeColor="text">
-                      {countdownText || "00d : 00h : 00m : 00s"}
-                    </ThemedText>
-                    <ThemedText style={styles.heroGPTitleOffline} themeColor="textSecondary">
-                      FP1 Starts: {session ? formatTime(session.date_start) : '--:--:--'}
-                    </ThemedText>
-
-                    {/* Minimalist SVG track trace background */}
-                    <View style={styles.minimalistTrace}>
-                      <svg width="100%" height="40" viewBox="0 0 100 40" style={{ opacity: 0.2 }}>
-                        <path
-                          d="M 10 20 Q 25 5, 50 20 T 90 20"
-                          fill="none"
-                          stroke={theme.text}
-                          strokeWidth="2"
-                          strokeDasharray="4 2"
-                        />
-                      </svg>
-                    </View>
-                  </View>
-                )}
-              </View>
-            </ThemedView>
-
-            {/* Section 2: Top 5 / Collapsible Grid Standings */}
-            {leaderboard.length > 0 && (
-              <ThemedView
-                style={[
-                  styles.gridCard,
-                  { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
-                ]}
-              >
-                <View style={styles.gridCardHeader}>
-                  <SymbolView
-                    name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
-                    size={16}
-                    tintColor={theme.cosmicIndigo}
-                  />
-                  <ThemedText type="smallBold" themeColor="text" style={{ letterSpacing: 0.5 }}>
-                    {showFullStandings ? "FULL GRID STANDINGS" : "TOP 5 STANDINGS"}
-                  </ThemedText>
-                  <ThemedText type="code" themeColor="textSecondary" style={{ fontSize: 9, marginLeft: 'auto' }}>
-                    {leaderboard.length} CARS
-                  </ThemedText>
-                </View>
-
-                <View style={styles.table}>
-                  {/* Header */}
-                  <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
-                    <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
-                    <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
-                    <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">INTERVAL</ThemedText>
-                  </View>
-
-                  {/* Rows */}
-                  {leaderboard.slice(0, showFullStandings ? leaderboard.length : 5).map((entry) => {
-                    const borderCol = entry.driver.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
-                    return (
-                      <View key={entry.driver_number} style={[styles.tableRow, { borderBottomColor: 'rgba(128,128,128,0.06)' }]}>
-                        <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
-                        <ThemedText type="code" style={[styles.colPos, { fontWeight: 'bold' }]}>
-                          {entry.position ?? '-'}
-                        </ThemedText>
-
-                        <View style={styles.driverColContainer}>
-                          <ThemedText type="smallBold" style={styles.driverAcronym} themeColor="text">
-                            {entry.driver.name_acronym}
-                          </ThemedText>
-                          {entry.compound && (
-                            <View style={[styles.miniTyreBadge, { borderColor: getTyreColor(entry.compound) }]}>
-                              <ThemedText type="code" style={[styles.miniTyreText, { color: getTyreColor(entry.compound) }]}>
-                                {getTyreLabel(entry.compound)}
-                              </ThemedText>
-                            </View>
-                          )}
-                          <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
-                            {entry.driver.last_name}
-                          </ThemedText>
-                        </View>
-
-                        <ThemedText type="code" style={styles.colGap} themeColor="text">
-                          {entry.gap_to_leader}
-                        </ThemedText>
-                      </View>
-                    );
-                  })}
-                </View>
-
-                <Pressable
-                  onPress={() => setShowFullStandings(!showFullStandings)}
-                  style={({ pressed }) => [
-                    styles.expandButton,
-                    { backgroundColor: theme.backgroundElement },
-                    pressed && { opacity: 0.8 }
-                  ]}
-                >
-                  <ThemedText type="code" style={styles.expandButtonText} themeColor="text">
-                    {showFullStandings ? "↑ COLLAPSE GRID" : "↓ VIEW FULL 20-DRIVER GRID"}
-                  </ThemedText>
-                </Pressable>
-              </ThemedView>
-            )}
-
-            {/* Section 3: Head-to-Head Battle Cards */}
-            <View style={styles.battleSection}>
-              <ThemedText type="smallBold" themeColor="textSecondary" style={{ letterSpacing: 0.8, marginBottom: Spacing.two }}>
-                HEAD-TO-HEAD DUELS
-              </ThemedText>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.battleCarousel}
-              >
-                {/* Battle 1: VER vs NOR */}
-                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
-                  <View style={[styles.battleTeamAccent, { backgroundColor: '#FF8000' }]} />
-                  <ThemedText type="code" style={styles.battleCategory}>STANDINGS DUEL</ThemedText>
-                  <View style={styles.battleRowContent}>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#3671C6', fontWeight: 'bold' }}>VER</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Red Bull</ThemedText>
-                    </View>
-                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#FF8000', fontWeight: 'bold' }}>NOR</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">McLaren</ThemedText>
-                    </View>
-                  </View>
-                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
-                    GAP: +18 PTS (VER lead)
-                  </ThemedText>
-                </ThemedView>
-
-                {/* Battle 2: HAM vs LEC */}
-                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
-                  <View style={[styles.battleTeamAccent, { backgroundColor: '#E8002D' }]} />
-                  <ThemedText type="code" style={styles.battleCategory}>SCUDERIA DELTA</ThemedText>
-                  <View style={styles.battleRowContent}>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#E8002D', fontWeight: 'bold' }}>HAM</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Ferrari</ThemedText>
-                    </View>
-                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#ffffff', fontWeight: 'bold' }}>LEC</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Ferrari</ThemedText>
-                    </View>
-                  </View>
-                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
-                    GAP: +6 PTS (HAM lead)
-                  </ThemedText>
-                </ThemedView>
-
-                {/* Battle 3: ANT vs RUS */}
-                <ThemedView style={[styles.battleCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
-                  <View style={[styles.battleTeamAccent, { backgroundColor: '#27F4D2' }]} />
-                  <ThemedText type="code" style={styles.battleCategory}>SILVER ARROWS DELTA</ThemedText>
-                  <View style={styles.battleRowContent}>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#27F4D2', fontWeight: 'bold' }}>ANT</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Mercedes</ThemedText>
-                    </View>
-                    <ThemedText type="code" style={styles.battleVs}>VS</ThemedText>
-                    <View style={styles.battleDriverCol}>
-                      <ThemedText type="subtitle" style={{ color: '#a1a1aa', fontWeight: 'bold' }}>RUS</ThemedText>
-                      <ThemedText type="code" style={{ fontSize: 9 }} themeColor="textSecondary">Mercedes</ThemedText>
-                    </View>
-                  </View>
-                  <ThemedText type="code" style={styles.battleDelta} themeColor="text">
-                    GAP: +6 PTS (ANT lead)
-                  </ThemedText>
-                </ThemedView>
-              </ScrollView>
-            </View>
-
-            {/* Section 4: Live Race Control Terminal (Filtered to 3) */}
-            <ThemedView
-              style={[
-                styles.filteredFeedCard,
-                { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
-              ]}
-            >
-              <View style={styles.gridCardHeader}>
-                <SymbolView
-                  name={{ ios: 'bell.badge.fill', android: 'notifications_active', web: 'notifications_active' }}
-                  size={15}
-                  tintColor={theme.solarAmber}
-                />
-                <ThemedText type="smallBold" themeColor="text" style={{ letterSpacing: 0.8 }}>
-                  RACE CONTROL TERMINAL (LATEST)
-                </ThemedText>
-              </View>
-
-              <View style={styles.filteredFeedList}>
-                {raceControl.slice(0, 3).length === 0 ? (
-                  <ThemedText type="code" style={{ textAlign: 'center', paddingVertical: Spacing.two }} themeColor="textSecondary">
-                    No logs recorded.
-                  </ThemedText>
-                ) : (
-                  raceControl.slice(0, 3).map((msg, i) => {
-                    const dotCol = msg.flag ? getFlagColor(msg.flag) : '#4b5563';
-                    return (
-                      <View key={i} style={styles.filteredFeedItem}>
-                        <View style={[styles.statusDot, { backgroundColor: dotCol }]} />
-                        <ThemedText type="code" style={styles.filteredFeedTime} themeColor="textSecondary">
-                          [{formatTime(msg.date)}]
-                        </ThemedText>
-                        <ThemedText type="code" style={styles.filteredFeedText} themeColor="text" numberOfLines={1}>
-                          {msg.message}
-                        </ThemedText>
-                      </View>
-                    );
-                  })
-                )}
-              </View>
-            </ThemedView>
-
-            {/* Launch Console CTA */}
-            <Pressable
-              onPress={() => setViewMode('console')}
-              style={({ pressed }) => [
-                styles.consoleLaunchBtn,
-                { backgroundColor: theme.cosmicIndigo },
-                pressed && { opacity: 0.9 },
-              ]}
-            >
-              <SymbolView
-                name={{ ios: 'terminal.fill', android: 'terminal', web: 'terminal' }}
-                size={20}
-                tintColor="#ffffff"
-              />
-              <ThemedText type="subtitle" style={styles.consoleLaunchText}>
-                LAUNCH PIT WALL CONSOLE
-              </ThemedText>
-            </Pressable>
+        {/* ── A: STATE-AWARE HERO ── */}
+        {loading ? (
+          <View style={styles.heroSkeleton}>
+            <ActivityIndicator size="large" color="#E10600" />
           </View>
         ) : (
-          <>
-            {/* Live timing console back button & header */}
-            <View style={styles.consoleHeader}>
-              <Pressable
-                onPress={() => setViewMode('home')}
-                style={({ pressed }) => [
-                  styles.backBtn,
-                  { backgroundColor: theme.backgroundElement },
-                  pressed && { opacity: 0.8 },
-                ]}
-              >
-                <SymbolView
-                  name={{ ios: 'chevron.left', android: 'chevron_left', web: 'arrow_back' }}
-                  size={14}
-                  tintColor={theme.text}
-                />
-                <ThemedText type="code" style={[styles.backBtnText, { color: theme.text }]}>
-                  BACK
-                </ThemedText>
-              </Pressable>
-
-              <ThemedText type="code" style={[styles.consoleModeLabel, { color: theme.neonTeal }]}>
-                // PIT WALL MODE: LIVE TIMING CONSOLE
-              </ThemedText>
-            </View>
-
-            {/* HERO TITLE SECTION */}
-            {session && (
-              <ThemedView style={styles.heroSection}>
-                <View style={styles.headerRow}>
-                  <View style={styles.gpDetails}>
-                    <View style={styles.accentBar} />
-                    <ThemedText type="subtitle" style={styles.gpTitle} themeColor="text">
-                      {session.location.toUpperCase()} GRAND PRIX
-                    </ThemedText>
-                    <ThemedText style={styles.gpSubtitle} themeColor="textSecondary">
-                      {session.circuit_short_name} · {session.session_type} · {session.year}
-                    </ThemedText>
-                    <ThemedText type="code" style={styles.sessionTimesHeader} themeColor="textSecondary">
-                      Start: {formatTime(session.date_start)} — End: {formatTime(session.date_end)}
-                    </ThemedText>
-                  </View>
-
-                  <Pressable
-                    onPress={() => setUseLocalTime(!useLocalTime)}
-                    style={({ pressed }) => [
-                      styles.timeToggleBtn,
-                      { backgroundColor: theme.backgroundElement, borderColor: useLocalTime ? theme.neonTeal : theme.cosmicIndigo },
-                      pressed && { opacity: 0.7 },
-                    ]}
-                  >
-                    <SymbolView
-                      name={{ ios: 'clock.fill', android: 'schedule', web: 'schedule' }}
-                      size={13}
-                      tintColor={useLocalTime ? theme.neonTeal : theme.cosmicIndigo}
-                    />
-                    <ThemedText type="code" style={[styles.timeToggleText, { color: useLocalTime ? theme.neonTeal : theme.cosmicIndigo }]}>
-                      {useLocalTime ? '⊙ MY TIME' : '◎ TRACK TIME'}
-                    </ThemedText>
-                  </Pressable>
-                </View>
-
-                <Animated.View style={[styles.flagBanner, { opacity: flagOpacity, backgroundColor: getFlagColor(trackFlag) }]}>
-                  <SymbolView
-                    name={{ ios: 'flag.fill', android: 'flag', web: 'flag' }}
-                    size={15}
-                    tintColor="#000000"
-                  />
-                  <ThemedText type="smallBold" style={styles.flagText}>
-                    {getFlagLabel(trackFlag)}
-                  </ThemedText>
-                  {isLive && (
-                    <View style={styles.liveIndicator}>
-                      <View style={styles.liveDot} />
-                      <ThemedText type="code" style={styles.liveText}>LIVE</ThemedText>
-                    </View>
-                  )}
-                </Animated.View>
-              </ThemedView>
-            )}
-
-            {/* RESPONSIVE LAYOUT */}
-            <View style={styles.mainLayout}>
-              
-              {/* LEADERBOARD STANDINGS */}
-              <View style={styles.leaderboardContainer}>
-                <ThemedView 
-                  style={[
-                    styles.sectionCard, 
-                    { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }
-                  ]}
-                >
-                  <View style={styles.cardAccentBar} />
-                  <View style={styles.sectionHeader}>
-                    <SymbolView
-                      name={{ ios: 'list.number', android: 'format_list_numbered', web: 'format_list_numbered' }}
-                      size={15}
-                      tintColor={theme.cosmicIndigo}
-                    />
-                    <ThemedText type="smallBold" style={styles.sectionTitle} themeColor="text">
-                      SESSION STANDINGS
-                    </ThemedText>
-                    {leaderboard.length > 0 && (
-                      <View style={[styles.driverCountBadge, { backgroundColor: theme.backgroundElement }]}>
-                        <ThemedText type="code" style={[styles.driverCountText, { color: theme.textSecondary }]}>
-                          {leaderboard.length} CARS
-                        </ThemedText>
-                      </View>
-                    )}
-                  </View>
-
-                  <View style={styles.table}>
-                    <View style={[styles.tableHeader, { borderBottomColor: theme.backgroundElement }]}>
-                      <ThemedText type="code" style={styles.colPos} themeColor="textSecondary">POS</ThemedText>
-                      <ThemedText type="code" style={styles.colDriver} themeColor="textSecondary">DRIVER</ThemedText>
-                      <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">LAPS</ThemedText>
-                      <ThemedText type="code" style={styles.colAge} themeColor="textSecondary">AGE</ThemedText>
-                      <ThemedText type="code" style={styles.colGap} themeColor="textSecondary">GAP</ThemedText>
-                    </View>
-
-                    {leaderboard.map((entry) => {
-                      const isSelected = entry.driver_number === selectedDriverNumber;
-                      const borderCol = entry.driver.team_colour ? `#${entry.driver.team_colour}` : theme.neonTeal;
-
-                      return (
-                        <Pressable
-                          key={entry.driver_number}
-                          onPress={() => {
-                            setSelectedDriverNumber(entry.driver_number);
-                            if (Platform.OS !== 'web') {
-                              setModalVisible(true);
-                            }
-                          }}
-                          style={({ pressed }) => [
-                            styles.tableRow,
-                            { borderBottomColor: 'rgba(128,128,128,0.06)' },
-                            isSelected && { backgroundColor: theme.backgroundSelected },
-                            pressed && { opacity: 0.8 },
-                          ]}
-                        >
-                          <View style={[styles.teamLine, { backgroundColor: borderCol }]} />
-                          
-                          <ThemedText 
-                            type="code" 
-                            style={[
-                              styles.colPos, 
-                              { fontWeight: 'bold' },
-                              entry.dnf && { color: theme.textSecondary }
-                            ]}
-                          >
-                            {entry.dnf ? 'DNF' : (entry.position ?? '-')}
-                          </ThemedText>
-
-                          <View style={styles.driverColContainer}>
-                            {entry.driver.headshot_url ? (
-                              <Image
-                                source={{ uri: entry.driver.headshot_url }}
-                                style={styles.driverAvatarRow}
-                                resizeMode="contain"
-                              />
-                            ) : (
-                              <View style={[styles.driverAvatarFallbackRow, { backgroundColor: theme.backgroundElement }]} />
-                            )}
-
-                            <ThemedText type="smallBold" style={styles.driverAcronym} themeColor="text">
-                              {entry.driver.name_acronym}
-                            </ThemedText>
-
-                            {entry.compound && (
-                              <View 
-                                style={[
-                                  styles.miniTyreBadge, 
-                                  { 
-                                    borderColor: getTyreColor(entry.compound)
-                                  }
-                                ]}
-                              >
-                                <ThemedText 
-                                  type="code" 
-                                  style={[
-                                    styles.miniTyreText, 
-                                    { color: getTyreColor(entry.compound) }
-                                  ]}
-                                >
-                                  {getTyreLabel(entry.compound)}
-                                </ThemedText>
-                              </View>
-                            )}
-
-                            <ThemedText type="code" style={styles.driverLastName} themeColor="textSecondary" numberOfLines={1}>
-                              {entry.driver.last_name}
-                            </ThemedText>
-                          </View>
-
-                          <ThemedText type="code" style={styles.colLaps} themeColor="textSecondary">
-                            {entry.number_of_laps}
-                          </ThemedText>
-
-                          <ThemedText
-                            type="code"
-                            style={[styles.colAge, entry.stint_age && entry.stint_age > 20 ? { color: '#f59e0b' } : undefined]}
-                            themeColor={entry.stint_age && entry.stint_age > 20 ? undefined : 'textSecondary'}
-                          >
-                            {entry.stint_age ?? '—'}
-                          </ThemedText>
-
-                          <ThemedText type="code" style={styles.colGap} themeColor="text">
-                            {entry.gap_to_leader}
-                          </ThemedText>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                </ThemedView>
-              </View>
-
-              {Platform.OS === 'web' && selectedEntry && (
-                <View style={styles.sidebarContainer}>
-                  <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
-                  <CircuitMap
-                    sessionKey={session?.session_key ?? null}
-                    drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
-                    isLive={isLive}
-                    highlightDriverNumber={selectedDriverNumber}
-                  />
-
-                  <View style={styles.detailCardGroup}>
-                    <F1Telemetry
-                      driverNumber={selectedEntry.driver_number}
-                      sessionKey={session?.session_key}
-                      driverColor={selectedEntry.driver.team_colour}
-                      session={session}
-                    />
-                    <F1DriverCard
-                      driver={selectedEntry.driver}
-                      sessionKey={session?.session_key}
-                      useLocalTime={useLocalTime}
-                    />
-                  </View>
-
-                  {renderRaceControlFeed()}
-                </View>
-              )}
-
-              {Platform.OS !== 'web' && (
-                <View style={styles.leaderboardContainer}>
-                  <WeatherPanel sessionKey={session?.session_key ?? null} isLive={isLive} />
-                  <CircuitMap
-                    sessionKey={session?.session_key ?? null}
-                    drivers={new Map(leaderboard.map((e) => [e.driver_number, { name_acronym: e.driver.name_acronym, team_colour: e.driver.team_colour }]))}
-                    isLive={isLive}
-                    highlightDriverNumber={selectedDriverNumber}
-                  />
-                  {renderRaceControlFeed()}
-                </View>
-              )}
-
-            </View>
-
-            {Platform.OS !== 'web' && selectedEntry && (
-              <Modal
-                animationType="slide"
-                transparent={true}
-                visible={modalVisible}
-                onRequestClose={() => setModalVisible(false)}
-              >
-                <View style={styles.modalOverlay}>
-                  <View style={[styles.modalContent, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
-                    <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
-                    
-                    <View style={styles.modalHeaderRow}>
-                      <ThemedText type="smallBold" themeColor="text">TELEMETRY & TIMINGS</ThemedText>
-                      <Pressable 
-                        onPress={() => setModalVisible(false)}
-                        style={({ pressed }) => [
-                          styles.modalCloseBtn, 
-                          { backgroundColor: theme.backgroundElement },
-                          pressed && { opacity: 0.7 }
-                        ]}
-                      >
-                        <ThemedText type="code" style={styles.modalCloseBtnText} themeColor="text">CLOSE</ThemedText>
-                      </Pressable>
-                    </View>
-
-                    <ScrollView contentContainerStyle={styles.modalScroll}>
-                      <View style={styles.detailCardGroup}>
-                        <F1Telemetry
-                          driverNumber={selectedEntry.driver_number}
-                          sessionKey={session?.session_key}
-                          driverColor={selectedEntry.driver.team_colour}
-                          session={session}
-                        />
-                        <F1DriverCard
-                          driver={selectedEntry.driver}
-                          sessionKey={session?.session_key}
-                          useLocalTime={useLocalTime}
-                        />
-                      </View>
-                    </ScrollView>
-                  </View>
-                </View>
-              </Modal>
-            )}
-          </>
+          <HeroCard
+            session={session}
+            isLive={isLive}
+            countdown={countdown}
+            raceControl={raceControl}
+          />
         )}
+
+        {/* ── B: TOP 5 GRID ── */}
+        <ThemedView style={[styles.section, { backgroundColor: theme.surfaceVariant, borderColor: theme.outline }]}>
+          {/* Section header */}
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionPip} />
+            <ThemedText style={styles.sectionTitle}>
+              {isLive ? 'LIVE TIMING' : 'LAST RESULTS'} · TOP {leaderboard.length > 0 ? Math.min(leaderboard.length, 5) : 5}
+            </ThemedText>
+            {isLive && (
+              <View style={styles.liveBadge}>
+                <View style={styles.liveBadgeDot} />
+                <ThemedText style={styles.liveBadgeText}>LIVE</ThemedText>
+              </View>
+            )}
+            {leaderboard.length > 0 && (
+              <ThemedText style={styles.totalCars} themeColor="textSecondary">
+                {leaderboard.length} CARS
+              </ThemedText>
+            )}
+          </View>
+
+          {/* Leaderboard */}
+          {loading ? (
+            <View style={styles.lbSkeleton}>
+              <ActivityIndicator size="small" color={theme.primary} />
+            </View>
+          ) : leaderboard.length === 0 ? (
+            <View style={styles.lbEmpty}>
+              <ThemedText style={styles.lbEmptyText} themeColor="textSecondary">No timing data available</ThemedText>
+            </View>
+          ) : (
+            <View style={styles.lbList}>
+              {visibleLeaderboard.map((entry, idx) => (
+                <LeaderboardRow key={entry.driver_number} entry={entry} idx={idx} />
+              ))}
+            </View>
+          )}
+
+          {/* Expand toggle */}
+          {leaderboard.length > 5 && (
+            <Pressable
+              onPress={toggleShowFull}
+              style={({ pressed }) => [
+                styles.expandToggle,
+                { borderColor: theme.outline },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              <ThemedText style={styles.expandToggleText} themeColor="textSecondary">
+                {showFull
+                  ? '▲ COLLAPSE TO TOP 5'
+                  : `▼ VIEW FULL ${leaderboard.length}-CAR GRID`}
+              </ThemedText>
+            </Pressable>
+          )}
+        </ThemedView>
+
+        {/* ── C: BATTLE TRACKER CAROUSEL ── */}
+        <View style={styles.section2}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionPip} />
+            <ThemedText style={styles.sectionTitle}>BATTLE TRACKER</ThemedText>
+          </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.carouselContent}
+            decelerationRate="fast"
+            snapToInterval={196}
+          >
+            {BATTLE_PAIRS.map((pair) => (
+              <BattleCard key={pair.label} pair={pair} />
+            ))}
+          </ScrollView>
+        </View>
+
+        {/* ── Race Control Terminal (brief) ── */}
+        {raceControl.length > 0 && (
+          <ThemedView style={[styles.section, { backgroundColor: theme.surfaceVariant, borderColor: theme.outline }]}>
+            <View style={styles.sectionHeader}>
+              <View style={[styles.sectionPip, { backgroundColor: '#eab308' }]} />
+              <ThemedText style={styles.sectionTitle}>RACE CONTROL</ThemedText>
+            </View>
+            {raceControl.slice(0, 3).map((msg, i) => (
+              <View key={i} style={styles.rcRow}>
+                <View style={[styles.rcStrip, { backgroundColor: getFlagText(msg.flag) }]} />
+                <ThemedText style={styles.rcMsg} numberOfLines={2}>{msg.message}</ThemedText>
+              </View>
+            ))}
+          </ThemedView>
+        )}
+
+        {Platform.OS === 'web' && <WebBadge />}
       </ThemedView>
     </ScrollView>
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  scrollView: {
-    flex: 1,
-  },
-  contentContainer: {
+  scroll: { flex: 1 },
+  content: {
     flexDirection: 'row',
     justifyContent: 'center',
   },
@@ -1138,558 +989,140 @@ const styles = StyleSheet.create({
     maxWidth: MaxContentWidth,
     flexGrow: 1,
     paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
+    gap: Spacing.three,
     alignItems: 'stretch',
   },
-  loadingWrapper: {
-    flex: 1,
+
+  // Hero skeleton
+  heroSkeleton: {
+    height: 220,
+    borderRadius: M3Shape.xl,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.three,
+    backgroundColor: '#1C1C1E',
   },
-  heroSection: {
-    alignItems: 'stretch',
-    gap: Spacing.three,
-    paddingTop: Spacing.four,
-    paddingBottom: Spacing.two,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  accentBar: {
-    width: 36,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: '#ff1801',
-    marginBottom: Spacing.one,
-  },
-  gpDetails: {
-    alignItems: 'flex-start',
-    gap: 3,
-  },
-  gpTitle: {
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
-    fontSize: 22,
-  },
-  gpSubtitle: {
-    fontSize: 13,
-    letterSpacing: 0.3,
-  },
-  sessionTimesHeader: {
-    fontSize: 10,
-    letterSpacing: 0.2,
-  },
-  timeToggleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: 20,
-    borderWidth: 1.5,
-  },
-  timeToggleText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  flagBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.two,
-    paddingVertical: Spacing.two + 2,
-    paddingHorizontal: Spacing.three,
-    borderRadius: Spacing.three,
-  },
-  flagText: {
-    color: '#000000',
-    letterSpacing: 0.8,
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  liveIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 2,
-    borderRadius: Spacing.one,
-    marginLeft: Spacing.two,
-    gap: Spacing.one,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#ef4444',
-  },
-  liveText: {
-    fontSize: 8,
-    fontWeight: 'bold',
-    color: '#ffffff',
-  },
-  mainLayout: {
-    flexDirection: 'row',
-    gap: Spacing.four,
-    flexWrap: 'wrap',
-    alignItems: 'flex-start',
-  },
-  leaderboardContainer: {
-    flex: 1.2,
-    minWidth: 320,
-  },
-  sidebarContainer: {
-    flex: 1,
-    minWidth: 320,
-    gap: Spacing.four,
-  },
-  detailCardGroup: {
-    gap: Spacing.four,
-  },
-  sectionCard: {
-    borderRadius: Spacing.three,
+
+  // Section wrapper (Top 5)
+  section: {
+    borderRadius: M3Shape.xl,
     borderWidth: 1,
-    overflow: 'hidden',
-    gap: Spacing.three,
-    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
+    padding: Spacing.three,
+    gap: Spacing.two,
+    ...Platform.select({
+      web: { boxShadow: '0 4px 20px rgba(0,0,0,0.2)' } as any,
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.18,
+        shadowRadius: 12,
+        elevation: 4,
+      },
+    }),
   },
-  cardAccentBar: {
-    height: 3,
-    backgroundColor: '#ff1801',
+
+  // Section without background card (Battle carousel)
+  section2: {
+    gap: Spacing.two,
   },
-  feedCard: {
-    maxHeight: 280,
-  },
+
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingTop: Spacing.three,
-  },
-  sectionTitle: {
-    fontSize: 11,
-    letterSpacing: 1,
-    flex: 1,
-  },
-  driverCountBadge: {
-    borderRadius: 6,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-  },
-  driverCountText: {
-    fontSize: 8,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  table: {
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingBottom: Spacing.three,
-  },
-  tableHeader: {
-    flexDirection: 'row',
-    paddingBottom: Spacing.one,
-    borderBottomWidth: 1,
-    paddingHorizontal: Spacing.two,
-  },
-  tableRow: {
-    flexDirection: 'row',
-    paddingVertical: Spacing.two,
-    borderBottomWidth: 1,
-    alignItems: 'center',
-    paddingRight: Spacing.two,
-    position: 'relative',
-  },
-  teamLine: {
-    width: 3,
-    position: 'absolute',
-    left: 0,
-    top: Spacing.one,
-    bottom: Spacing.one,
-    borderRadius: 1.5,
-  },
-  colPos: {
-    width: 40,
-    fontSize: 10,
-    textAlign: 'center',
-  },
-  colDriver: {
-    flex: 2,
-    fontSize: 10,
-  },
-  driverColContainer: {
-    flex: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  driverAvatarRow: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  driverAvatarFallbackRow: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-  },
-  driverAcronym: {
-    fontSize: 12,
-  },
-  miniTyreBadge: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#000000',
-  },
-  miniTyreText: {
-    fontSize: 7.5,
-    fontWeight: 'bold',
-    lineHeight: 9,
-    textAlign: 'center',
-  },
-  driverLastName: {
-    fontSize: 10.5,
-    flex: 1,
-  },
-  colLaps: {
-    width: 40,
-    fontSize: 10,
-    textAlign: 'center',
-  },
-  colAge: {
-    width: 32,
-    fontSize: 9.5,
-    textAlign: 'center',
-    fontWeight: 'bold',
-  },
-  colGap: {
-    flex: 1.2,
-    fontSize: 10,
-    textAlign: 'right',
-  },
-  feedScroll: {
-    maxHeight: 200,
-    paddingHorizontal: Spacing.three,
-  },
-  emptyFeedText: {
-    fontSize: 11,
-    textAlign: 'center',
-    paddingVertical: Spacing.three,
-    paddingHorizontal: Spacing.three,
-  },
-  feedItem: {
-    paddingVertical: Spacing.two,
-    borderBottomWidth: 1,
-    gap: Spacing.one,
-  },
-  feedMeta: {
-    flexDirection: 'row',
-    gap: Spacing.two,
-    alignItems: 'center',
-    flexWrap: 'wrap',
-  },
-  feedTimestamp: {
-    fontSize: 9.5,
-  },
-  lapBadge: {
-    borderRadius: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 2,
-  },
-  lapBadgeText: {
-    fontSize: 8,
-  },
-  feedFlagBadge: {
-    borderRadius: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 2,
-  },
-  feedFlagText: {
-    fontSize: 8,
-    fontWeight: 'bold',
-    color: '#000000',
-  },
-  feedText: {
-    fontSize: 10.5,
-    lineHeight: 14,
-  },
-  // Bottom Sheet Modal specific styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    borderTopLeftRadius: Spacing.four,
-    borderTopRightRadius: Spacing.four,
-    borderTopWidth: 1,
-    borderLeftWidth: 1,
-    borderRightWidth: 1,
-    maxHeight: '82%',
-    padding: Spacing.three,
-    gap: Spacing.three,
-    ...cardShadow({ opacity: 0.3, radius: 12, offsetY: -4, elevation: 10 }),
-  },
-  modalHandle: {
-    width: 40,
-    height: 5,
-    borderRadius: 2.5,
-    alignSelf: 'center',
     marginBottom: Spacing.one,
   },
-  modalHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingBottom: Spacing.one,
+  sectionPip: {
+    width: 3,
+    height: 14,
+    borderRadius: 2,
+    backgroundColor: '#E10600',
   },
-  modalCloseBtn: {
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.one,
-    borderRadius: Spacing.two,
-  },
-  modalCloseBtnText: {
-    fontSize: 9.5,
-    fontWeight: 'bold',
-  },
-  modalScroll: {
-    paddingBottom: Spacing.five,
-    gap: Spacing.four,
-  },
-  homeDashboard: {
-    gap: Spacing.four,
-    paddingVertical: Spacing.three,
-    alignSelf: 'stretch',
-  },
-  heroCard: {
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-    padding: Spacing.three,
-    gap: Spacing.two,
-    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
-  },
-  heroHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  liveIndicatorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  pulsingLiveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#ff1801',
-  },
-  heroBody: {
-    marginTop: Spacing.one,
-  },
-  heroLiveContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: Spacing.three,
-  },
-  heroGPTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  heroLaunchBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: 8,
-  },
-  heroLaunchBtnText: {
-    color: '#ffffff',
-    fontSize: 10.5,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  heroOfflineContent: {
-    gap: Spacing.one,
-    position: 'relative',
-  },
-  countdownValue: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  heroGPTitleOffline: {
-    fontSize: 12,
-  },
-  minimalistTrace: {
-    position: 'absolute',
-    right: 0,
-    bottom: -10,
-    width: 120,
-    height: 40,
-  },
-  gridCard: {
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-    paddingHorizontal: Spacing.three,
-    paddingTop: Spacing.three,
-    paddingBottom: Spacing.two,
-    gap: Spacing.three,
-    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
-  },
-  gridCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    paddingBottom: Spacing.one,
-  },
-  expandButton: {
-    alignSelf: 'stretch',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: Spacing.two,
-    borderRadius: 8,
-    marginTop: Spacing.two,
-  },
-  expandButtonText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  battleSection: {
-    alignSelf: 'stretch',
-  },
-  battleCarousel: {
-    gap: Spacing.three,
-    paddingBottom: Spacing.one,
-  },
-  battleCard: {
-    width: 175,
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-    padding: Spacing.three,
-    gap: Spacing.two,
-    position: 'relative',
-    ...cardShadow({ opacity: 0.15, radius: 8, offsetY: 3, elevation: 2 }),
-  },
-  battleTeamAccent: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 4,
-  },
-  battleCategory: {
-    fontSize: 8.5,
-    color: '#94a3b8',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  battleRowContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.one,
-  },
-  battleDriverCol: {
-    alignItems: 'flex-start',
-  },
-  battleVs: {
-    fontSize: 9.5,
-    color: '#4b5563',
-    fontWeight: 'bold',
-  },
-  battleDelta: {
-    fontSize: 9.5,
-    fontWeight: 'bold',
-    marginTop: Spacing.one,
-  },
-  filteredFeedCard: {
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-    padding: Spacing.three,
-    gap: Spacing.two,
-    ...cardShadow({ opacity: 0.2, radius: 10, offsetY: 4, elevation: 3 }),
-  },
-  filteredFeedList: {
-    gap: Spacing.two,
-  },
-  filteredFeedItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  filteredFeedTime: {
+  sectionTitle: {
     fontSize: 9,
-  },
-  filteredFeedText: {
-    fontSize: 10.5,
+    fontWeight: '800',
+    letterSpacing: 1.5,
     flex: 1,
   },
-  consoleLaunchBtn: {
+  liveBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.three,
-    paddingVertical: Spacing.three,
-    borderRadius: 12,
-    marginTop: Spacing.two,
-    ...cardShadow({ opacity: 0.3, radius: 12, offsetY: 6, elevation: 5 }),
+    gap: 5,
+    backgroundColor: '#E1060015',
+    borderRadius: M3Shape.xs,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
   },
-  consoleLaunchText: {
-    color: '#ffffff',
-    fontWeight: 'bold',
+  liveBadgeDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#E10600',
+  },
+  liveBadgeText: {
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1,
+    color: '#E10600',
+  },
+  totalCars: {
+    fontSize: 9,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+
+  // Leaderboard
+  lbSkeleton: {
+    paddingVertical: Spacing.four,
+    alignItems: 'center',
+  },
+  lbEmpty: {
+    paddingVertical: Spacing.five,
+    alignItems: 'center',
+  },
+  lbEmptyText: {
+    fontSize: 12,
+  },
+  lbList: {
+    gap: Spacing.one,
+  },
+
+  // Expand toggle
+  expandToggle: {
+    borderTopWidth: 1,
+    paddingTop: Spacing.two,
+    alignItems: 'center',
+    marginTop: Spacing.one,
+  },
+  expandToggleText: {
+    fontSize: 9,
+    fontWeight: '700',
     letterSpacing: 1,
   },
-  consoleHeader: {
+
+  // Carousel
+  carouselContent: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: Spacing.two,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.03)',
-    alignSelf: 'stretch',
-  },
-  backBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: 8,
+    paddingHorizontal: 2,
+    paddingBottom: Spacing.one,
   },
-  backBtnText: {
-    fontSize: 9.5,
-    fontWeight: 'bold',
+
+  // Race Control
+  rcRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    alignItems: 'flex-start',
   },
-  consoleModeLabel: {
-    fontSize: 9.5,
-    letterSpacing: 0.5,
+  rcStrip: {
+    width: 3,
+    alignSelf: 'stretch',
+    minHeight: 14,
+    borderRadius: 2,
+    flexShrink: 0,
+  },
+  rcMsg: {
+    fontSize: 10,
+    lineHeight: 15,
+    flex: 1,
   },
 });

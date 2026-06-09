@@ -24,8 +24,8 @@ export default function AppTabs() {
           <TabTrigger name="home" href="/" asChild>
             <TabButton>Live Timing</TabButton>
           </TabTrigger>
-          <TabTrigger name="explore" href="/explore" asChild>
-            <TabButton>Sessions</TabButton>
+          <TabTrigger name="pitwall" href="/pitwall" asChild>
+            <TabButton>Pit Wall</TabButton>
           </TabTrigger>
           <TabTrigger name="standings" href="/standings" asChild>
             <TabButton>Standings</TabButton>
@@ -44,10 +44,12 @@ export function TabButton({ children, isFocused, ...props }: TabTriggerSlotProps
     <Pressable {...props} style={({ pressed }) => pressed && styles.pressed}>
       <ThemedView
         type={isFocused ? 'backgroundSelected' : 'backgroundElement'}
-        style={styles.tabButtonView}>
+        style={[styles.tabButtonView, isFocused && styles.tabButtonFocused]}
+      >
         <ThemedText type="small" themeColor={isFocused ? 'text' : 'textSecondary'}>
           {children}
         </ThemedText>
+        {isFocused && <View style={styles.activePip} />}
       </ThemedView>
     </Pressable>
   );
@@ -55,14 +57,18 @@ export function TabButton({ children, isFocused, ...props }: TabTriggerSlotProps
 
 export function CustomTabList(props: TabListProps) {
   const scheme = useColorScheme();
-  const colors = Colors[scheme === 'unspecified' ? 'light' : scheme];
+  const colors = Colors[scheme === 'unspecified' ? 'light' : (scheme ?? 'dark')];
 
   return (
     <View {...props} style={styles.tabListContainer}>
       <ThemedView type="backgroundElement" style={styles.innerContainer}>
-        <ThemedText type="smallBold" style={styles.brandText}>
-          Artello F1
-        </ThemedText>
+        {/* Brand */}
+        <View style={styles.brandBlock}>
+          <View style={styles.brandPip} />
+          <ThemedText type="smallBold" style={styles.brandText}>
+            Artello F1
+          </ThemedText>
+        </View>
 
         {props.children}
 
@@ -89,19 +95,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     flexDirection: 'row',
+    top: 0,
   },
   innerContainer: {
     paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.five,
-    borderRadius: Spacing.five,
+    paddingHorizontal: Spacing.four,
+    borderRadius: 40,
     flexDirection: 'row',
     alignItems: 'center',
     flexGrow: 1,
     gap: Spacing.two,
     maxWidth: MaxContentWidth,
   },
+  brandBlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginRight: 'auto' as any,
+  },
+  brandPip: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#E10600',
+  },
   brandText: {
-    marginRight: 'auto',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
   pressed: {
     opacity: 0.7,
@@ -110,6 +131,19 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
     paddingHorizontal: Spacing.three,
     borderRadius: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  tabButtonFocused: {
+    paddingBottom: 3,
+  },
+  activePip: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#E10600',
+    marginLeft: 2,
   },
   externalPressable: {
     flexDirection: 'row',
