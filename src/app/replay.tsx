@@ -1,9 +1,21 @@
+/**
+ * Lap Times Screen
+ *
+ * Browse any past (or recent) session and view a driver's full lap-by-lap breakdown:
+ *   - Lap time
+ *   - Sector 1 / 2 / 3 times (colour-coded: purple = session best, green = personal best)
+ *   - Tyre compound + age at start of stint
+ *   - Pit stop laps highlighted
+ *
+ * Data sources: OpenF1 API (/sessions, /drivers, /laps, /pit)
+ * No car_data / engine telemetry is fetched — only /laps which is reliably available.
+ */
+
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Animated,
   Modal,
   Platform,
   Pressable,
@@ -13,15 +25,14 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CircuitMap } from '@/components/circuit-map';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { BottomTabInset, M3Shape, MaxContentWidth, Spacing } from '@/constants/theme';
 import { cardShadow, fetchWithRetry } from '@/constants/ui-utils';
 import { useTheme } from '@/hooks/use-theme';
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Session {
   session_key: number;
@@ -42,105 +53,287 @@ interface Driver {
   full_name: string;
   team_name: string;
   team_colour: string;
-  headshot_url?: string;
 }
 
-interface CarDataFrame {
-  date: string;
-  speed: number;
-  rpm: number;
-  n_gear: number;
-  throttle: number;
-  brake: number;
-  drs: number;
+interface LapData {
+  lap_number: number;
+  lap_duration?: number | null;
+  duration_sector_1?: number | null;
+  duration_sector_2?: number | null;
+  duration_sector_3?: number | null;
+  compound?: string | null;
+  tyre_age_at_start?: number | null;
+  is_pit_out_lap?: boolean;
+  date_start?: string;
+}
+
+interface PitStop {
+  lap_number: number;
+  pit_duration?: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getTyreColor(comp: string) {
-  switch (comp?.toUpperCase()) {
-    case 'SOFT': return '#ef4444';
-    case 'MEDIUM': return '#eab308';
-    case 'HARD': return '#e2e8f0';
+function formatLapTime(seconds: number | null | undefined): string {
+  if (seconds == null || seconds <= 0) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = (seconds % 60).toFixed(3);
+  return `${m}:${s.padStart(6, '0')}`;
+}
+
+function formatSector(s: number | null | undefined): string {
+  if (s == null || s <= 0) return '—';
+  const abs = Math.abs(s);
+  const m = Math.floor(abs / 60);
+  const sec = (abs % 60).toFixed(3);
+  return m > 0 ? `${m}:${sec.padStart(6, '0')}` : sec;
+}
+
+function tyreColor(compound: string | null | undefined): string {
+  switch (compound?.toUpperCase()) {
+    case 'SOFT':         return '#ef4444';
+    case 'MEDIUM':       return '#eab308';
+    case 'HARD':         return '#e2e8f0';
     case 'INTERMEDIATE': return '#22c55e';
-    case 'WET': return '#3b82f6';
-    default: return '#94a3b8';
+    case 'WET':          return '#3b82f6';
+    default:             return '#64748b';
   }
 }
 
-function formatDuration(seconds: number) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
+function tyreAbbrev(compound: string | null | undefined): string {
+  switch (compound?.toUpperCase()) {
+    case 'SOFT':         return 'S';
+    case 'MEDIUM':       return 'M';
+    case 'HARD':         return 'H';
+    case 'INTERMEDIATE': return 'I';
+    case 'WET':          return 'W';
+    default:             return '?';
+  }
 }
 
-// ─── Sub-components ──────────────────────────────────────────────────────────
+type SectorFlag = 'purple' | 'green' | 'yellow' | 'none';
 
-function ShiftLights({ rpmPercent }: { rpmPercent: number }) {
-  const total = 15;
-  const active = Math.floor((rpmPercent / 100) * total);
-  const isShift = rpmPercent >= 93;
-  const blink = isShift && Math.floor(Date.now() / 150) % 2 === 0;
+function getSectorFlag(
+  time: number | null | undefined,
+  sessionBest: number | undefined,
+  personalBest: number | undefined,
+): SectorFlag {
+  if (time == null || time <= 0) return 'none';
+  if (sessionBest != null && Math.abs(time - sessionBest) < 0.001) return 'purple';
+  if (personalBest != null && Math.abs(time - personalBest) < 0.001) return 'green';
+  return 'yellow';
+}
+
+function sectorBg(flag: SectorFlag): string {
+  switch (flag) {
+    case 'purple': return 'rgba(168,85,247,0.18)';
+    case 'green':  return 'rgba(34,197,94,0.18)';
+    case 'yellow': return 'rgba(234,179,8,0.18)';
+    default:       return 'rgba(255,255,255,0.04)';
+  }
+}
+
+function sectorFg(flag: SectorFlag, fallback: string): string {
+  switch (flag) {
+    case 'purple': return '#a855f7';
+    case 'green':  return '#22c55e';
+    case 'yellow': return '#eab308';
+    default:       return fallback;
+  }
+}
+
+// ─── Session best & personal best computation ────────────────────────────────
+
+function computeBests(laps: LapData[]) {
+  let s1 = Infinity, s2 = Infinity, s3 = Infinity, lap = Infinity;
+  for (const l of laps) {
+    if (l.duration_sector_1 && l.duration_sector_1 > 0) s1 = Math.min(s1, l.duration_sector_1);
+    if (l.duration_sector_2 && l.duration_sector_2 > 0) s2 = Math.min(s2, l.duration_sector_2);
+    if (l.duration_sector_3 && l.duration_sector_3 > 0) s3 = Math.min(s3, l.duration_sector_3);
+    if (l.lap_duration && l.lap_duration > 0) lap = Math.min(lap, l.lap_duration);
+  }
+  return {
+    s1: s1 === Infinity ? undefined : s1,
+    s2: s2 === Infinity ? undefined : s2,
+    s3: s3 === Infinity ? undefined : s3,
+    lap: lap === Infinity ? undefined : lap,
+  };
+}
+
+// ─── Lap Row ──────────────────────────────────────────────────────────────────
+
+function LapRow({
+  lap,
+  sessionBests,
+  personalBests,
+  isPit,
+  teamColor,
+}: {
+  lap: LapData;
+  sessionBests: ReturnType<typeof computeBests>;
+  personalBests: ReturnType<typeof computeBests>;
+  isPit: boolean;
+  teamColor: string;
+}) {
+  const theme = useTheme();
+
+  const lapFlag: SectorFlag =
+    lap.lap_duration && lap.lap_duration > 0
+      ? getSectorFlag(lap.lap_duration, sessionBests.lap, personalBests.lap)
+      : 'none';
+  const s1Flag = getSectorFlag(lap.duration_sector_1, sessionBests.s1, personalBests.s1);
+  const s2Flag = getSectorFlag(lap.duration_sector_2, sessionBests.s2, personalBests.s2);
+  const s3Flag = getSectorFlag(lap.duration_sector_3, sessionBests.s3, personalBests.s3);
+
+  const rowBg = lap.is_pit_out_lap
+    ? 'rgba(234,179,8,0.06)'
+    : isPit
+    ? 'rgba(99,102,241,0.08)'
+    : 'transparent';
 
   return (
-    <View style={slStyles.row}>
-      {Array.from({ length: total }).map((_, i) => {
-        let color = '#1e293b';
-        if (i < active) {
-          if (i < 5) color = '#22c55e';
-          else if (i < 10) color = '#eab308';
-          else color = '#ef4444';
-        }
-        const finalColor = blink ? '#3b82f6' : color;
-        return (
-          <View
-            key={i}
-            style={[
-              slStyles.led,
-              {
-                backgroundColor: finalColor,
-                ...Platform.select({
-                  web: { boxShadow: i < active ? `0 0 6px ${finalColor}` : 'none' },
-                  default: {
-                    shadowColor: finalColor,
-                    shadowOpacity: i < active ? 0.8 : 0,
-                    shadowRadius: i < active ? 4 : 0,
-                  },
-                }),
-              },
-            ]}
-          />
-        );
-      })}
+    <View style={[lapRowStyles.row, { backgroundColor: rowBg, borderBottomColor: theme.outline }]}>
+      {/* Lap number */}
+      <View style={[lapRowStyles.lapNumBox, { backgroundColor: theme.surfaceVariant }]}>
+        <ThemedText style={lapRowStyles.lapNum}>
+          {lap.lap_number}
+        </ThemedText>
+        {isPit && (
+          <View style={[lapRowStyles.pitDot, { backgroundColor: '#6366f1' }]} />
+        )}
+      </View>
+
+      {/* Tyre */}
+      <View style={[
+        lapRowStyles.tyreBadge,
+        { backgroundColor: tyreColor(lap.compound) + '28', borderColor: tyreColor(lap.compound) },
+      ]}>
+        <ThemedText style={[lapRowStyles.tyreText, { color: tyreColor(lap.compound) }]}>
+          {tyreAbbrev(lap.compound)}
+        </ThemedText>
+        {(lap.tyre_age_at_start ?? 0) > 0 && (
+          <ThemedText style={[lapRowStyles.tyreAge, { color: tyreColor(lap.compound) }]}>
+            {lap.tyre_age_at_start}
+          </ThemedText>
+        )}
+      </View>
+
+      {/* Lap time */}
+      <View style={[lapRowStyles.timeCell, { backgroundColor: sectorBg(lapFlag) }]}>
+        <ThemedText style={[lapRowStyles.timeText, { color: sectorFg(lapFlag, theme.text) }]}>
+          {formatLapTime(lap.lap_duration)}
+        </ThemedText>
+      </View>
+
+      {/* S1 */}
+      <View style={[lapRowStyles.sectorCell, { backgroundColor: sectorBg(s1Flag) }]}>
+        <ThemedText style={[lapRowStyles.sectorText, { color: sectorFg(s1Flag, theme.textSecondary) }]}>
+          {formatSector(lap.duration_sector_1)}
+        </ThemedText>
+      </View>
+
+      {/* S2 */}
+      <View style={[lapRowStyles.sectorCell, { backgroundColor: sectorBg(s2Flag) }]}>
+        <ThemedText style={[lapRowStyles.sectorText, { color: sectorFg(s2Flag, theme.textSecondary) }]}>
+          {formatSector(lap.duration_sector_2)}
+        </ThemedText>
+      </View>
+
+      {/* S3 */}
+      <View style={[lapRowStyles.sectorCell, { backgroundColor: sectorBg(s3Flag) }]}>
+        <ThemedText style={[lapRowStyles.sectorText, { color: sectorFg(s3Flag, theme.textSecondary) }]}>
+          {formatSector(lap.duration_sector_3)}
+        </ThemedText>
+      </View>
     </View>
   );
 }
 
-const slStyles = StyleSheet.create({
+const lapRowStyles = StyleSheet.create({
   row: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: Spacing.two,
-    backgroundColor: '#020205',
-    paddingVertical: 6,
-    borderRadius: Spacing.two,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.03)',
+    paddingVertical: 5,
+    gap: 3,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  led: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginHorizontal: 1,
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.6)',
-    ...Platform.select({ web: { transition: 'all 0.1s ease' } }),
+  lapNumBox: {
+    width: 28,
+    height: 22,
+    borderRadius: M3Shape.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    position: 'relative',
+  },
+  lapNum: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#94a3b8',
+    fontVariant: ['tabular-nums'] as any,
+  },
+  pitDot: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  tyreBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    borderRadius: M3Shape.xs,
+    borderWidth: 1.5,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    flexShrink: 0,
+    minWidth: 26,
+    justifyContent: 'center',
+  },
+  tyreText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  tyreAge: {
+    fontSize: 7.5,
+    fontWeight: '600',
+    opacity: 0.8,
+  },
+  timeCell: {
+    flex: 1.3,
+    borderRadius: M3Shape.xs,
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+    alignItems: 'center',
+  },
+  timeText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'] as any,
+    letterSpacing: 0.2,
+  },
+  sectorCell: {
+    flex: 1,
+    borderRadius: M3Shape.xs,
+    paddingHorizontal: 3,
+    paddingVertical: 3,
+    alignItems: 'center',
+  },
+  sectorText: {
+    fontSize: 8.5,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'] as any,
+    letterSpacing: 0.2,
   },
 });
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────
 
-export default function ReplayScreen() {
+export default function LapTimesScreen() {
   const safeAreaInsets = useSafeAreaInsets();
   const theme = useTheme();
 
@@ -177,39 +370,24 @@ export default function ReplayScreen() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
 
-  // ── Telemetry data ────────────────────────────────────────────────────────
-  const [dataLoading, setDataLoading] = useState(false);
-  const [telemetryData, setTelemetryData] = useState<CarDataFrame[]>([]);
+  // ── Lap data ──────────────────────────────────────────────────────────────
+  const [lapsLoading, setLapsLoading] = useState(false);
+  const [laps, setLaps] = useState<LapData[]>([]);
+  const [pits, setPits] = useState<PitStop[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-
-  // ── Playback state ────────────────────────────────────────────────────────
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentFrame, setCurrentFrame] = useState(0);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const playbackRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── Current displayed telemetry ───────────────────────────────────────────
-  const [telemetry, setTelemetry] = useState({
-    speed: 0, rpm: 0, gear: 0, throttle: 0, brake: 0, drs: 0,
-  });
-
-  const animSpeed = useRef(new Animated.Value(0)).current;
-  const animRPM = useRef(new Animated.Value(0)).current;
 
   // ── Mobile modals ─────────────────────────────────────────────────────────
   const [sessionPickerVisible, setSessionPickerVisible] = useState(false);
   const [driverPickerVisible, setDriverPickerVisible] = useState(false);
 
   // ── Fetch sessions on first focus ────────────────────────────────────────
-  // useFocusEffect prevents loading sessions on app startup (before tab is visited).
   useFocusEffect(
     useCallback(() => {
-      if (sessions.length > 0) return; // already loaded
+      if (sessions.length > 0) return;
       let cancelled = false;
       (async () => {
         try {
           setSessionsLoading(true);
-          // Fetch past sessions for last 2 years — SEQUENTIAL to avoid burst
           const r2026 = await fetchWithRetry('https://api.openf1.org/v1/sessions?year=2026');
           const data2026: Session[] = r2026.ok ? await r2026.json() : [];
 
@@ -219,16 +397,12 @@ export default function ReplayScreen() {
           if (cancelled) return;
           const allSessions = [...data2026, ...data2025];
           const now = new Date();
-
-          // Only include sessions that have ended
           const past = allSessions
             .filter((s) => s.date_end && new Date(s.date_end) < now)
             .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime());
 
           setSessions(past);
-          if (past.length > 0) {
-            setSelectedSession(past[0]);
-          }
+          if (past.length > 0) setSelectedSession(past[0]);
         } catch (err) {
           console.warn('Session fetch error:', err);
         } finally {
@@ -249,9 +423,8 @@ export default function ReplayScreen() {
         setDriversLoading(true);
         setDrivers([]);
         setSelectedDriver(null);
-        setTelemetryData([]);
-        setCurrentFrame(0);
-        setIsPlaying(false);
+        setLaps([]);
+        setPits([]);
 
         const res = await fetchWithRetry(
           `https://api.openf1.org/v1/drivers?session_key=${selectedSession.session_key}`
@@ -260,9 +433,7 @@ export default function ReplayScreen() {
         const data: Driver[] = await res.json();
         if (cancelled) return;
 
-        const sorted = [...data].sort((a, b) =>
-          a.name_acronym.localeCompare(b.name_acronym)
-        );
+        const sorted = [...data].sort((a, b) => a.name_acronym.localeCompare(b.name_acronym));
         setDrivers(sorted);
         if (sorted.length > 0) setSelectedDriver(sorted[0]);
       } catch (err) {
@@ -274,129 +445,80 @@ export default function ReplayScreen() {
     return () => { cancelled = true; };
   }, [selectedSession]);
 
-  // ── Load telemetry when driver or session changes ─────────────────────────
-  const loadTelemetry = useCallback(async () => {
+  // ── Load laps when driver / session changes ───────────────────────────────
+  const loadLaps = useCallback(async () => {
     if (!selectedSession || !selectedDriver) return;
-
-    stopPlayback();
-    setDataLoading(true);
+    setLapsLoading(true);
     setLoadError(null);
-    setCurrentFrame(0);
-    setTelemetryData([]);
-    setTelemetry({ speed: 0, rpm: 0, gear: 0, throttle: 0, brake: 0, drs: 0 });
+    setLaps([]);
+    setPits([]);
 
     try {
-      const url =
-        `https://api.openf1.org/v1/car_data` +
-        `?session_key=${selectedSession.session_key}` +
-        `&driver_number=${selectedDriver.driver_number}`;
+      const sk = selectedSession.session_key;
+      const dn = selectedDriver.driver_number;
 
-      const res = await fetchWithRetry(url);
-      if (!res.ok) throw new Error('Car data fetch failed');
-      const data: CarDataFrame[] = await res.json();
+      const [lapRes, pitRes] = await Promise.allSettled([
+        fetchWithRetry(`https://api.openf1.org/v1/laps?session_key=${sk}&driver_number=${dn}`),
+        fetchWithRetry(`https://api.openf1.org/v1/pit?session_key=${sk}&driver_number=${dn}`),
+      ]);
 
-      if (data.length === 0) {
-        setLoadError('No telemetry data available for this session / driver.');
+      let lapData: LapData[] = [];
+      if (lapRes.status === 'fulfilled' && lapRes.value.ok) {
+        lapData = await lapRes.value.json();
+        lapData.sort((a, b) => a.lap_number - b.lap_number);
+      }
+
+      let pitData: PitStop[] = [];
+      if (pitRes.status === 'fulfilled' && pitRes.value.ok) {
+        pitData = await pitRes.value.json();
+      }
+
+      if (lapData.length === 0) {
+        setLoadError('No lap data available for this session / driver.');
       } else {
-        setTelemetryData(data);
-        // Prime display with first frame
-        const f = data[0];
-        setTelemetry({
-          speed: f.speed ?? 0,
-          rpm: f.rpm ?? 0,
-          gear: f.n_gear ?? 0,
-          throttle: f.throttle ?? 0,
-          brake: f.brake ?? 0,
-          drs: f.drs ?? 0,
-        });
+        setLaps(lapData);
+        setPits(pitData);
       }
     } catch (err) {
-      console.warn('Telemetry load error:', err);
-      setLoadError('Failed to load telemetry data. Please try again.');
+      console.warn('Laps load error:', err);
+      setLoadError('Failed to load lap data. Please try again.');
     } finally {
-      setDataLoading(false);
+      setLapsLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSession, selectedDriver]);
 
   useEffect(() => {
     if (selectedDriver && selectedSession) {
-      loadTelemetry();
+      loadLaps();
     }
-  }, [selectedDriver, selectedSession, loadTelemetry]);
-
-  // ── Playback engine ───────────────────────────────────────────────────────
-  const stopPlayback = useCallback(() => {
-    if (playbackRef.current) {
-      clearInterval(playbackRef.current);
-      playbackRef.current = null;
-    }
-    setIsPlaying(false);
-  }, []);
-
-  const startPlayback = useCallback(() => {
-    if (telemetryData.length === 0) return;
-    setIsPlaying(true);
-
-    playbackRef.current = setInterval(() => {
-      setCurrentFrame((prev) => {
-        const next = prev + 1;
-        if (next >= telemetryData.length) {
-          stopPlayback();
-          return telemetryData.length - 1;
-        }
-        const f = telemetryData[next];
-        setTelemetry({
-          speed: f.speed ?? 0,
-          rpm: f.rpm ?? 0,
-          gear: f.n_gear ?? 0,
-          throttle: f.throttle ?? 0,
-          brake: f.brake ?? 0,
-          drs: f.drs ?? 0,
-        });
-        Animated.spring(animSpeed, { toValue: f.speed ?? 0, useNativeDriver: false }).start();
-        Animated.spring(animRPM, { toValue: f.rpm ?? 0, useNativeDriver: false }).start();
-        return next;
-      });
-    }, Math.round(250 / playbackSpeed));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [telemetryData, playbackSpeed, stopPlayback]);
-
-  const togglePlayback = useCallback(() => {
-    if (isPlaying) {
-      stopPlayback();
-    } else {
-      if (currentFrame >= telemetryData.length - 1) {
-        setCurrentFrame(0);
-      }
-      startPlayback();
-    }
-  }, [isPlaying, currentFrame, telemetryData.length, startPlayback, stopPlayback]);
-
-  // Restart interval when speed changes while playing
-  useEffect(() => {
-    if (isPlaying) {
-      stopPlayback();
-      startPlayback();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbackSpeed]);
-
-  useEffect(() => () => stopPlayback(), [stopPlayback]);
+  }, [selectedDriver, selectedSession, loadLaps]);
 
   // ── Derived values ────────────────────────────────────────────────────────
-  const maxRpm = 13500;
-  const rpmPercent = Math.min(100, Math.max(0, (telemetry.rpm / maxRpm) * 100));
-  const teamColor = selectedDriver?.team_colour ? `#${selectedDriver.team_colour}` : theme.neonTeal;
+  const teamColor = selectedDriver?.team_colour
+    ? `#${selectedDriver.team_colour}`
+    : theme.neonTeal;
 
-  const totalFrames = telemetryData.length;
-  const progressPercent = totalFrames > 1 ? (currentFrame / (totalFrames - 1)) * 100 : 0;
+  const sessionBests = computeBests(laps);
+  const personalBests = computeBests(laps); // same driver — all laps are personal
 
-  // Estimate replay duration in seconds at 1x (250ms per frame)
-  const totalDurationSecs = (totalFrames * 0.25) / playbackSpeed;
-  const elapsedSecs = (currentFrame * 0.25) / playbackSpeed;
+  const pitLapNumbers = new Set(pits.map(p => p.lap_number));
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // Fastest lap number
+  const fastestLap = laps.reduce<LapData | null>((best, lap) => {
+    if (!lap.lap_duration || lap.lap_duration <= 0) return best;
+    if (!best || !best.lap_duration || lap.lap_duration < best.lap_duration) return lap;
+    return best;
+  }, null);
+
+  // Stats
+  const validLaps = laps.filter(l => l.lap_duration && l.lap_duration > 0);
+  const avgLap = validLaps.length > 0
+    ? validLaps.reduce((sum, l) => sum + (l.lap_duration ?? 0), 0) / validLaps.length
+    : null;
+
+  // ── Render helpers ────────────────────────────────────────────────────────
+
   const renderSessionSelector = () => (
     <ThemedView
       style={[
@@ -407,7 +529,7 @@ export default function ReplayScreen() {
       <View style={[styles.cardAccentBar, { backgroundColor: theme.cosmicIndigo }]} />
       <View style={styles.pickerHeader}>
         <SymbolView
-          name={{ ios: 'film', android: 'movie', web: 'movie' }}
+          name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
           size={14}
           tintColor={theme.cosmicIndigo}
         />
@@ -417,7 +539,7 @@ export default function ReplayScreen() {
       </View>
 
       {sessionsLoading ? (
-        <ActivityIndicator size="small" color={theme.cosmicIndigo} style={{ marginTop: 8 }} />
+        <ActivityIndicator size="small" color={theme.cosmicIndigo} style={{ marginTop: 8, marginBottom: 12 }} />
       ) : (
         <Pressable
           onPress={() => setSessionPickerVisible(true)}
@@ -437,9 +559,7 @@ export default function ReplayScreen() {
               </ThemedText>
             </View>
           ) : (
-            <ThemedText type="code" themeColor="textSecondary">
-              Select a session…
-            </ThemedText>
+            <ThemedText type="code" themeColor="textSecondary">Select a session…</ThemedText>
           )}
           <SymbolView
             name={{ ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
@@ -471,7 +591,7 @@ export default function ReplayScreen() {
       </View>
 
       {driversLoading ? (
-        <ActivityIndicator size="small" color={teamColor} style={{ marginTop: 8 }} />
+        <ActivityIndicator size="small" color={teamColor} style={{ marginTop: 8, marginBottom: 12 }} />
       ) : (
         <Pressable
           onPress={() => drivers.length > 0 && setDriverPickerVisible(true)}
@@ -485,9 +605,7 @@ export default function ReplayScreen() {
           {selectedDriver ? (
             <View style={{ flex: 1 }}>
               <View style={styles.driverRow}>
-                <View
-                  style={[styles.driverColorDot, { backgroundColor: teamColor }]}
-                />
+                <View style={[styles.driverDot, { backgroundColor: teamColor }]} />
                 <ThemedText type="smallBold" themeColor="text">
                   {selectedDriver.name_acronym}
                 </ThemedText>
@@ -514,30 +632,55 @@ export default function ReplayScreen() {
     </ThemedView>
   );
 
-  const renderTelemetryCard = () => {
-    if (dataLoading) {
+  const renderStatsBar = () => {
+    if (laps.length === 0) return null;
+    return (
+      <View style={[styles.statsBar, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
+        <View style={styles.statItem}>
+          <ThemedText style={styles.statLabel} themeColor="textSecondary">LAPS</ThemedText>
+          <ThemedText style={[styles.statValue, { color: teamColor }]}>{laps.length}</ThemedText>
+        </View>
+        <View style={[styles.statDivider, { backgroundColor: theme.backgroundElement }]} />
+        <View style={styles.statItem}>
+          <ThemedText style={styles.statLabel} themeColor="textSecondary">FASTEST</ThemedText>
+          <ThemedText style={[styles.statValue, { color: '#a855f7' }]}>
+            {formatLapTime(fastestLap?.lap_duration)}
+          </ThemedText>
+        </View>
+        <View style={[styles.statDivider, { backgroundColor: theme.backgroundElement }]} />
+        <View style={styles.statItem}>
+          <ThemedText style={styles.statLabel} themeColor="textSecondary">AVERAGE</ThemedText>
+          <ThemedText style={[styles.statValue, { color: theme.text }]}>
+            {formatLapTime(avgLap)}
+          </ThemedText>
+        </View>
+        <View style={[styles.statDivider, { backgroundColor: theme.backgroundElement }]} />
+        <View style={styles.statItem}>
+          <ThemedText style={styles.statLabel} themeColor="textSecondary">PITS</ThemedText>
+          <ThemedText style={[styles.statValue, { color: '#6366f1' }]}>{pits.length}</ThemedText>
+        </View>
+      </View>
+    );
+  };
+
+  const renderLapTable = () => {
+    if (lapsLoading) {
       return (
-        <ThemedView
-          type="backgroundElement"
-          style={[styles.loadingCard]}
-        >
+        <View style={styles.loadingCard}>
           <ActivityIndicator size="large" color={teamColor} />
           <ThemedText type="code" themeColor="textSecondary" style={styles.loadingLabel}>
-            Loading telemetry…
+            Loading laps…
           </ThemedText>
           <ThemedText type="code" themeColor="textSecondary" style={styles.loadingSubLabel}>
             {selectedDriver?.name_acronym} · {selectedSession?.session_name}
           </ThemedText>
-        </ThemedView>
+        </View>
       );
     }
 
     if (loadError) {
       return (
-        <ThemedView
-          type="backgroundElement"
-          style={styles.loadingCard}
-        >
+        <View style={styles.loadingCard}>
           <SymbolView
             name={{ ios: 'exclamationmark.triangle.fill', android: 'warning', web: 'warning' }}
             size={32}
@@ -547,312 +690,85 @@ export default function ReplayScreen() {
             {loadError}
           </ThemedText>
           <Pressable
-            onPress={loadTelemetry}
+            onPress={loadLaps}
             style={({ pressed }) => [
               styles.retryBtn,
               { backgroundColor: theme.cosmicIndigo },
               pressed && { opacity: 0.8 },
             ]}
           >
-            <ThemedText type="smallBold" style={{ color: '#fff', fontSize: 11 }}>
-              RETRY
-            </ThemedText>
+            <ThemedText type="smallBold" style={{ color: '#fff', fontSize: 11 }}>RETRY</ThemedText>
           </Pressable>
-        </ThemedView>
+        </View>
       );
     }
 
-    if (telemetryData.length === 0 || !selectedDriver) {
+    if (laps.length === 0 || !selectedDriver) {
       return (
-        <ThemedView type="backgroundElement" style={styles.loadingCard}>
+        <View style={styles.loadingCard}>
           <SymbolView
-            name={{ ios: 'waveform.path', android: 'ssid_chart', web: 'ssid_chart' }}
+            name={{ ios: 'stopwatch', android: 'timer', web: 'timer' }}
             size={36}
             tintColor={theme.backgroundElement}
           />
           <ThemedText type="code" themeColor="textSecondary" style={styles.loadingLabel}>
-            Select a session and driver to begin replay
+            Select a session and driver to view lap times
           </ThemedText>
-        </ThemedView>
+        </View>
       );
     }
 
     return (
       <ThemedView
         style={[
-          styles.telemetryCard,
+          styles.tableCard,
           { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
         ]}
       >
-        {/* Team color stripe */}
-        <View style={[styles.stripe, { backgroundColor: teamColor }]} />
+        <View style={[styles.tableStripe, { backgroundColor: teamColor }]} />
 
-        {/* Header */}
-        <View style={styles.telemetryHeader}>
-          <View style={[styles.statusDot, { backgroundColor: isPlaying ? '#22c55e' : theme.textSecondary }]} />
-          <ThemedText type="smallBold" style={styles.telemetryTitle} themeColor="text">
-            TELEMETRY REPLAY · {selectedDriver.name_acronym}
-          </ThemedText>
-
-          {/* DRS Badge */}
-          {telemetry.drs >= 8 ? (
-            <View style={styles.drsBadgeActive}>
-              <ThemedText type="code" style={styles.drsText}>DRS ▶</ThemedText>
-            </View>
-          ) : (
-            <View style={styles.drsBadgeInactive}>
-              <ThemedText type="code" style={styles.drsTextInactive}>DRS</ThemedText>
-            </View>
-          )}
+        {/* Table header */}
+        <View style={[styles.tableHeaderRow, { borderBottomColor: theme.backgroundElement }]}>
+          <ThemedText style={[styles.tableHeaderCell, { width: 28 }]} themeColor="textSecondary">LAP</ThemedText>
+          <ThemedText style={[styles.tableHeaderCell, { width: 30 }]} themeColor="textSecondary">TYR</ThemedText>
+          <ThemedText style={[styles.tableHeaderCell, { flex: 1.3 }]} themeColor="textSecondary">TIME</ThemedText>
+          <ThemedText style={[styles.tableHeaderCell, { flex: 1 }]} themeColor="textSecondary">S1</ThemedText>
+          <ThemedText style={[styles.tableHeaderCell, { flex: 1 }]} themeColor="textSecondary">S2</ThemedText>
+          <ThemedText style={[styles.tableHeaderCell, { flex: 1 }]} themeColor="textSecondary">S3</ThemedText>
         </View>
 
-        {/* Shift Lights */}
-        <ShiftLights rpmPercent={rpmPercent} />
-
-        {/* Main Gauges */}
-        <View style={styles.gaugesRow}>
-          {/* Speed */}
-          <View style={styles.gaugeItem}>
-            <View style={[styles.dialCircle, { borderColor: teamColor }]}>
-              <ThemedText style={[styles.dialValue, { color: teamColor }]}>
-                {telemetry.speed}
-              </ThemedText>
-              <ThemedText type="code" style={styles.dialUnit} themeColor="textSecondary">KM/H</ThemedText>
+        {/* Legend */}
+        <View style={styles.legendRow}>
+          {[
+            { color: '#a855f7', label: 'Session best' },
+            { color: '#22c55e', label: 'Personal best' },
+            { color: '#eab308', label: 'Other' },
+            { color: '#6366f1', label: 'Pit lap' },
+          ].map(({ color, label }) => (
+            <View key={label} style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: color }]} />
+              <ThemedText style={styles.legendLabel} themeColor="textSecondary">{label}</ThemedText>
             </View>
-          </View>
-
-          {/* Gear */}
-          <View style={styles.gearBox}>
-            <ThemedText type="code" style={styles.gearLabel} themeColor="textSecondary">GEAR</ThemedText>
-            <ThemedText style={[styles.gearValue, { color: theme.text }]}>
-              {telemetry.gear === 0 ? 'N' : telemetry.gear}
-            </ThemedText>
-          </View>
-
-          {/* RPM */}
-          <View style={styles.gaugeItem}>
-            <View style={[styles.dialCircle, { borderColor: '#ef4444' }]}>
-              <ThemedText style={[styles.dialValue, { color: '#ef4444' }]}>
-                {Math.round(telemetry.rpm / 100) * 100}
-              </ThemedText>
-              <ThemedText type="code" style={styles.dialUnit} themeColor="textSecondary">RPM</ThemedText>
-            </View>
-          </View>
+          ))}
         </View>
 
-        {/* Pedals */}
-        <View
-          style={[
-            styles.pedalsRow,
-            {
-              backgroundColor: theme.background,
-              borderColor: 'rgba(255,255,255,0.03)',
-            },
-          ]}
-        >
-          {/* Throttle */}
-          <View style={styles.pedalCol}>
-            <View style={styles.pedalTopRow}>
-              <ThemedText type="code" style={styles.pedalLabel} themeColor="textSecondary">
-                THROTTLE
-              </ThemedText>
-              <ThemedText type="code" style={[styles.pedalPct, { color: '#22c55e' }]}>
-                {telemetry.throttle}%
-              </ThemedText>
-            </View>
-            <View style={[styles.pedalTrack, { backgroundColor: theme.backgroundElement }]}>
-              <View
-                style={[
-                  styles.pedalFill,
-                  {
-                    backgroundColor: '#22c55e',
-                    height: `${telemetry.throttle}%` as any,
-                    top: `${100 - telemetry.throttle}%` as any,
-                    ...Platform.select({
-                      web: { boxShadow: '0 0 8px #22c55e' },
-                      default: { shadowColor: '#22c55e', shadowOpacity: 0.5, shadowRadius: 5 },
-                    }),
-                  },
-                ]}
-              />
-            </View>
-          </View>
-
-          {/* Brake */}
-          <View style={styles.pedalCol}>
-            <View style={styles.pedalTopRow}>
-              <ThemedText type="code" style={styles.pedalLabel} themeColor="textSecondary">
-                BRAKE
-              </ThemedText>
-              <ThemedText type="code" style={[styles.pedalPct, { color: '#ef4444' }]}>
-                {telemetry.brake}%
-              </ThemedText>
-            </View>
-            <View style={[styles.pedalTrack, { backgroundColor: theme.backgroundElement }]}>
-              <View
-                style={[
-                  styles.pedalFill,
-                  {
-                    backgroundColor: '#ef4444',
-                    height: `${telemetry.brake}%` as any,
-                    top: `${100 - telemetry.brake}%` as any,
-                    ...Platform.select({
-                      web: { boxShadow: '0 0 8px #ef4444' },
-                      default: { shadowColor: '#ef4444', shadowOpacity: 0.5, shadowRadius: 5 },
-                    }),
-                  },
-                ]}
-              />
-            </View>
-          </View>
-        </View>
-
-        {/* ── Playback Controls ── */}
-        <View style={[styles.playbackSection, { borderTopColor: theme.backgroundElement }]}>
-          {/* Progress Bar */}
-          <View style={styles.progressArea}>
-            <ThemedText type="code" style={styles.progressTime} themeColor="textSecondary">
-              {formatDuration(elapsedSecs)}
-            </ThemedText>
-            <View style={[styles.progressTrack, { backgroundColor: theme.backgroundElement }]}>
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    backgroundColor: teamColor,
-                    width: `${progressPercent}%` as any,
-                    ...Platform.select({
-                      web: { boxShadow: `0 0 6px ${teamColor}` },
-                      default: {},
-                    }),
-                  },
-                ]}
-              />
-              <View
-                style={[
-                  styles.progressThumb,
-                  {
-                    backgroundColor: teamColor,
-                    left: `${progressPercent}%` as any,
-                    ...Platform.select({
-                      web: { boxShadow: `0 0 8px ${teamColor}` },
-                      default: {},
-                    }),
-                  },
-                ]}
-              />
-            </View>
-            <ThemedText type="code" style={styles.progressTime} themeColor="textSecondary">
-              {formatDuration(totalDurationSecs)}
-            </ThemedText>
-          </View>
-
-          {/* Buttons row */}
-          <View style={styles.controlsRow}>
-            {/* Rewind */}
-            <Pressable
-              onPress={() => {
-                stopPlayback();
-                setCurrentFrame(0);
-                const f = telemetryData[0];
-                if (f) setTelemetry({ speed: f.speed ?? 0, rpm: f.rpm ?? 0, gear: f.n_gear ?? 0, throttle: f.throttle ?? 0, brake: f.brake ?? 0, drs: f.drs ?? 0 });
-              }}
-              style={({ pressed }) => [
-                styles.controlBtn,
-                { backgroundColor: theme.backgroundElement },
-                pressed && { opacity: 0.6 },
-              ]}
-            >
-              <SymbolView
-                name={{ ios: 'backward.end.fill', android: 'skip_previous', web: 'skip_previous' }}
-                size={16}
-                tintColor={theme.text}
-              />
-            </Pressable>
-
-            {/* Play / Pause */}
-            <Pressable
-              onPress={togglePlayback}
-              style={({ pressed }) => [
-                styles.playBtn,
-                { backgroundColor: teamColor },
-                pressed && { opacity: 0.8 },
-              ]}
-            >
-              <SymbolView
-                name={
-                  isPlaying
-                    ? { ios: 'pause.fill', android: 'pause', web: 'pause' }
-                    : { ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }
-                }
-                size={20}
-                tintColor="#000000"
-              />
-            </Pressable>
-
-            {/* Forward to end */}
-            <Pressable
-              onPress={() => {
-                stopPlayback();
-                const last = telemetryData.length - 1;
-                setCurrentFrame(last);
-                const f = telemetryData[last];
-                if (f) setTelemetry({ speed: f.speed ?? 0, rpm: f.rpm ?? 0, gear: f.n_gear ?? 0, throttle: f.throttle ?? 0, brake: f.brake ?? 0, drs: f.drs ?? 0 });
-              }}
-              style={({ pressed }) => [
-                styles.controlBtn,
-                { backgroundColor: theme.backgroundElement },
-                pressed && { opacity: 0.6 },
-              ]}
-            >
-              <SymbolView
-                name={{ ios: 'forward.end.fill', android: 'skip_next', web: 'skip_next' }}
-                size={16}
-                tintColor={theme.text}
-              />
-            </Pressable>
-
-            {/* Speed selector */}
-            <View style={styles.speedRow}>
-              {[0.5, 1, 2, 5].map((speed) => (
-                <Pressable
-                  key={speed}
-                  onPress={() => setPlaybackSpeed(speed)}
-                  style={({ pressed }) => [
-                    styles.speedBtn,
-                    {
-                      backgroundColor:
-                        playbackSpeed === speed ? teamColor : theme.backgroundElement,
-                      borderColor:
-                        playbackSpeed === speed ? teamColor : 'transparent',
-                    },
-                    pressed && { opacity: 0.7 },
-                  ]}
-                >
-                  <ThemedText
-                    type="code"
-                    style={[
-                      styles.speedLabel,
-                      { color: playbackSpeed === speed ? '#000' : theme.textSecondary },
-                    ]}
-                  >
-                    {speed}×
-                  </ThemedText>
-                </Pressable>
-              ))}
-            </View>
-          </View>
-
-          {/* Frame counter */}
-          <ThemedText type="code" style={styles.frameCounter} themeColor="textSecondary">
-            FRAME {currentFrame + 1} / {totalFrames} · {selectedSession?.circuit_short_name}
-          </ThemedText>
-        </View>
+        {/* Lap rows */}
+        {laps.map((lap) => (
+          <LapRow
+            key={lap.lap_number}
+            lap={lap}
+            sessionBests={sessionBests}
+            personalBests={personalBests}
+            isPit={pitLapNumbers.has(lap.lap_number)}
+            teamColor={teamColor}
+          />
+        ))}
       </ThemedView>
     );
   };
 
-  // ── Session picker modal ──────────────────────────────────────────────────
+  // ── Pickers ───────────────────────────────────────────────────────────────
+
   const renderSessionPicker = () => (
     <Modal
       animationType="slide"
@@ -861,37 +777,24 @@ export default function ReplayScreen() {
       onRequestClose={() => setSessionPickerVisible(false)}
     >
       <View style={styles.modalOverlay}>
-        <View
-          style={[
-            styles.modalSheet,
-            { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
-          ]}
-        >
+        <View style={[styles.modalSheet, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
           <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
           <View style={styles.modalHeaderRow}>
             <ThemedText type="smallBold" themeColor="text">SELECT SESSION</ThemedText>
             <Pressable
               onPress={() => setSessionPickerVisible(false)}
-              style={({ pressed }) => [
-                styles.closeBtn,
-                { backgroundColor: theme.backgroundElement },
-                pressed && { opacity: 0.7 },
-              ]}
+              style={({ pressed }) => [styles.closeBtn, { backgroundColor: theme.backgroundElement }, pressed && { opacity: 0.7 }]}
             >
               <ThemedText type="code" style={styles.closeBtnText} themeColor="text">CLOSE</ThemedText>
             </Pressable>
           </View>
-
           <ScrollView style={styles.pickerList} nestedScrollEnabled>
             {sessions.map((sess) => {
               const isSelected = sess.session_key === selectedSession?.session_key;
               return (
                 <Pressable
                   key={sess.session_key}
-                  onPress={() => {
-                    setSelectedSession(sess);
-                    setSessionPickerVisible(false);
-                  }}
+                  onPress={() => { setSelectedSession(sess); setSessionPickerVisible(false); }}
                   style={({ pressed }) => [
                     styles.pickerItem,
                     { borderBottomColor: theme.backgroundElement },
@@ -923,7 +826,6 @@ export default function ReplayScreen() {
     </Modal>
   );
 
-  // ── Driver picker modal ───────────────────────────────────────────────────
   const renderDriverPicker = () => (
     <Modal
       animationType="slide"
@@ -932,27 +834,17 @@ export default function ReplayScreen() {
       onRequestClose={() => setDriverPickerVisible(false)}
     >
       <View style={styles.modalOverlay}>
-        <View
-          style={[
-            styles.modalSheet,
-            { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
-          ]}
-        >
+        <View style={[styles.modalSheet, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
           <View style={[styles.modalHandle, { backgroundColor: theme.backgroundElement }]} />
           <View style={styles.modalHeaderRow}>
             <ThemedText type="smallBold" themeColor="text">SELECT DRIVER</ThemedText>
             <Pressable
               onPress={() => setDriverPickerVisible(false)}
-              style={({ pressed }) => [
-                styles.closeBtn,
-                { backgroundColor: theme.backgroundElement },
-                pressed && { opacity: 0.7 },
-              ]}
+              style={({ pressed }) => [styles.closeBtn, { backgroundColor: theme.backgroundElement }, pressed && { opacity: 0.7 }]}
             >
               <ThemedText type="code" style={styles.closeBtnText} themeColor="text">CLOSE</ThemedText>
             </Pressable>
           </View>
-
           <ScrollView style={styles.pickerList} nestedScrollEnabled>
             {drivers.map((driver) => {
               const isSelected = driver.driver_number === selectedDriver?.driver_number;
@@ -960,10 +852,7 @@ export default function ReplayScreen() {
               return (
                 <Pressable
                   key={driver.driver_number}
-                  onPress={() => {
-                    setSelectedDriver(driver);
-                    setDriverPickerVisible(false);
-                  }}
+                  onPress={() => { setSelectedDriver(driver); setDriverPickerVisible(false); }}
                   style={({ pressed }) => [
                     styles.pickerItem,
                     { borderBottomColor: theme.backgroundElement },
@@ -974,12 +863,8 @@ export default function ReplayScreen() {
                   <View style={[styles.driverColorBar, { backgroundColor: drvColor }]} />
                   <View style={{ flex: 1 }}>
                     <View style={styles.driverRow}>
-                      <ThemedText type="smallBold" style={{ color: drvColor }}>
-                        {driver.name_acronym}
-                      </ThemedText>
-                      <ThemedText type="code" themeColor="text" numberOfLines={1}>
-                        {driver.full_name}
-                      </ThemedText>
+                      <ThemedText type="smallBold" style={{ color: drvColor }}>{driver.name_acronym}</ThemedText>
+                      <ThemedText type="code" themeColor="text" numberOfLines={1}>{driver.full_name}</ThemedText>
                     </View>
                     <ThemedText type="code" style={styles.pickerItemSub} themeColor="textSecondary">
                       {driver.team_name}
@@ -1001,33 +886,17 @@ export default function ReplayScreen() {
     </Modal>
   );
 
-  // ── Web inline pickers ────────────────────────────────────────────────────
+  // Web inline lists
   const renderWebSessionList = () => (
-    <ThemedView
-      style={[
-        styles.webListCard,
-        { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
-      ]}
-    >
+    <ThemedView style={[styles.webListCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
       <View style={[styles.cardAccentBar, { backgroundColor: theme.cosmicIndigo }]} />
       <View style={styles.pickerHeader}>
-        <SymbolView
-          name={{ ios: 'film', android: 'movie', web: 'movie' }}
-          size={14}
-          tintColor={theme.cosmicIndigo}
-        />
-        <ThemedText type="smallBold" style={styles.pickerTitle} themeColor="text">
-          SESSIONS
-        </ThemedText>
-        <ThemedText type="code" style={styles.pickerCount} themeColor="textSecondary">
-          {sessions.length}
-        </ThemedText>
+        <SymbolView name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }} size={14} tintColor={theme.cosmicIndigo} />
+        <ThemedText type="smallBold" style={styles.pickerTitle} themeColor="text">SESSIONS</ThemedText>
+        <ThemedText type="code" style={styles.pickerCount} themeColor="textSecondary">{sessions.length}</ThemedText>
       </View>
-
       {sessionsLoading ? (
-        <View style={styles.listLoading}>
-          <ActivityIndicator size="small" color={theme.cosmicIndigo} />
-        </View>
+        <View style={styles.listLoading}><ActivityIndicator size="small" color={theme.cosmicIndigo} /></View>
       ) : (
         <ScrollView style={styles.webList} nestedScrollEnabled showsVerticalScrollIndicator={false}>
           {sessions.map((sess) => {
@@ -1044,21 +913,14 @@ export default function ReplayScreen() {
                 ]}
               >
                 <View style={{ flex: 1 }}>
-                  <ThemedText
-                    type="smallBold"
-                    style={isSelected ? { color: theme.cosmicIndigo } : undefined}
-                    themeColor={isSelected ? undefined : 'text'}
-                    numberOfLines={1}
-                  >
+                  <ThemedText type="smallBold" style={isSelected ? { color: theme.cosmicIndigo } : undefined} themeColor={isSelected ? undefined : 'text'} numberOfLines={1}>
                     {sess.location.toUpperCase()} — {sess.session_name}
                   </ThemedText>
                   <ThemedText type="code" style={styles.webListItemSub} themeColor="textSecondary">
                     {sess.circuit_short_name} · {sess.year}
                   </ThemedText>
                 </View>
-                {isSelected && (
-                  <View style={[styles.selectedDot, { backgroundColor: theme.cosmicIndigo }]} />
-                )}
+                {isSelected && <View style={[styles.selectedDot, { backgroundColor: theme.cosmicIndigo }]} />}
               </Pressable>
             );
           })}
@@ -1068,31 +930,15 @@ export default function ReplayScreen() {
   );
 
   const renderWebDriverList = () => (
-    <ThemedView
-      style={[
-        styles.webListCard,
-        { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement },
-      ]}
-    >
+    <ThemedView style={[styles.webListCard, { backgroundColor: theme.cardBackground, borderColor: theme.backgroundElement }]}>
       <View style={[styles.cardAccentBar, { backgroundColor: teamColor }]} />
       <View style={styles.pickerHeader}>
-        <SymbolView
-          name={{ ios: 'person.fill', android: 'person', web: 'person' }}
-          size={14}
-          tintColor={teamColor}
-        />
-        <ThemedText type="smallBold" style={styles.pickerTitle} themeColor="text">
-          DRIVERS
-        </ThemedText>
-        <ThemedText type="code" style={styles.pickerCount} themeColor="textSecondary">
-          {drivers.length}
-        </ThemedText>
+        <SymbolView name={{ ios: 'person.fill', android: 'person', web: 'person' }} size={14} tintColor={teamColor} />
+        <ThemedText type="smallBold" style={styles.pickerTitle} themeColor="text">DRIVERS</ThemedText>
+        <ThemedText type="code" style={styles.pickerCount} themeColor="textSecondary">{drivers.length}</ThemedText>
       </View>
-
       {driversLoading ? (
-        <View style={styles.listLoading}>
-          <ActivityIndicator size="small" color={teamColor} />
-        </View>
+        <View style={styles.listLoading}><ActivityIndicator size="small" color={teamColor} /></View>
       ) : (
         <ScrollView style={styles.webList} nestedScrollEnabled showsVerticalScrollIndicator={false}>
           {drivers.map((driver) => {
@@ -1112,20 +958,12 @@ export default function ReplayScreen() {
                 <View style={[styles.driverColorBar, { backgroundColor: drvColor }]} />
                 <View style={{ flex: 1 }}>
                   <View style={styles.driverRow}>
-                    <ThemedText type="smallBold" style={{ color: drvColor, fontSize: 11 }}>
-                      {driver.name_acronym}
-                    </ThemedText>
-                    <ThemedText type="code" themeColor="text" numberOfLines={1} style={{ fontSize: 11 }}>
-                      {driver.full_name}
-                    </ThemedText>
+                    <ThemedText type="smallBold" style={{ color: drvColor, fontSize: 11 }}>{driver.name_acronym}</ThemedText>
+                    <ThemedText type="code" themeColor="text" numberOfLines={1} style={{ fontSize: 11 }}>{driver.full_name}</ThemedText>
                   </View>
-                  <ThemedText type="code" style={styles.webListItemSub} themeColor="textSecondary">
-                    {driver.team_name}
-                  </ThemedText>
+                  <ThemedText type="code" style={styles.webListItemSub} themeColor="textSecondary">{driver.team_name}</ThemedText>
                 </View>
-                {isSelected && (
-                  <View style={[styles.selectedDot, { backgroundColor: drvColor }]} />
-                )}
+                {isSelected && <View style={[styles.selectedDot, { backgroundColor: drvColor }]} />}
               </Pressable>
             );
           })}
@@ -1147,10 +985,10 @@ export default function ReplayScreen() {
         <ThemedView style={styles.heroSection}>
           <View style={styles.accentBar} />
           <ThemedText type="subtitle" style={styles.heroTitle} themeColor="text">
-            TELEMETRY REPLAY
+            LAP TIMES
           </ThemedText>
           <ThemedText style={styles.heroSubtitle} themeColor="textSecondary">
-            Select a session &amp; driver · replay car data frame-by-frame
+            Sector times, lap times &amp; tyre data — session by session
           </ThemedText>
         </ThemedView>
 
@@ -1159,13 +997,8 @@ export default function ReplayScreen() {
           <>
             {renderSessionSelector()}
             {renderDriverSelector()}
-            <CircuitMap
-              sessionKey={selectedSession?.session_key ?? null}
-              drivers={new Map(drivers.map((d) => [d.driver_number, { name_acronym: d.name_acronym, team_colour: d.team_colour }]))}
-              replayTimestamp={telemetryData[currentFrame]?.date ?? null}
-              highlightDriverNumber={selectedDriver?.driver_number ?? null}
-            />
-            {renderTelemetryCard()}
+            {renderStatsBar()}
+            {renderLapTable()}
             {renderSessionPicker()}
             {renderDriverPicker()}
           </>
@@ -1174,21 +1007,13 @@ export default function ReplayScreen() {
         {/* ── WEB layout ── */}
         {Platform.OS === 'web' && (
           <View style={styles.webLayout}>
-            {/* Left column: session + driver pickers */}
             <View style={styles.webLeftCol}>
               {renderWebSessionList()}
               {renderWebDriverList()}
-              <CircuitMap
-                sessionKey={selectedSession?.session_key ?? null}
-                drivers={new Map(drivers.map((d) => [d.driver_number, { name_acronym: d.name_acronym, team_colour: d.team_colour }]))}
-                replayTimestamp={telemetryData[currentFrame]?.date ?? null}
-                highlightDriverNumber={selectedDriver?.driver_number ?? null}
-              />
+              {renderStatsBar()}
             </View>
-
-            {/* Right column: telemetry */}
             <View style={styles.webRightCol}>
-              {renderTelemetryCard()}
+              {renderLapTable()}
             </View>
           </View>
         )}
@@ -1256,7 +1081,7 @@ const styles = StyleSheet.create({
     minWidth: 320,
   },
 
-  // Picker cards (mobile)
+  // Picker cards
   pickerCard: {
     borderRadius: Spacing.three,
     borderWidth: 1,
@@ -1281,9 +1106,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     flex: 1,
   },
-  pickerCount: {
-    fontSize: 10,
-  },
+  pickerCount: { fontSize: 10 },
   selectorBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1305,7 +1128,7 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     flexWrap: 'wrap',
   },
-  driverColorDot: {
+  driverDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
@@ -1317,6 +1140,84 @@ const styles = StyleSheet.create({
     marginRight: Spacing.two,
   },
 
+  // Stats bar
+  statsBar: {
+    flexDirection: 'row',
+    borderRadius: M3Shape.sm,
+    borderWidth: 1,
+    overflow: 'hidden',
+    ...cardShadow({ opacity: 0.1, radius: 6, offsetY: 2, elevation: 1 }),
+  },
+  statItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: Spacing.two,
+    gap: 2,
+  },
+  statLabel: {
+    fontSize: 7.5,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    opacity: 0.8,
+  },
+  statValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'] as any,
+    letterSpacing: 0.2,
+  },
+  statDivider: {
+    width: StyleSheet.hairlineWidth,
+    marginVertical: Spacing.one,
+  },
+
+  // Table card
+  tableCard: {
+    borderRadius: Spacing.three,
+    borderWidth: 1,
+    overflow: 'hidden',
+    ...cardShadow({ opacity: 0.2, radius: 12, offsetY: 4, elevation: 3 }),
+  },
+  tableStripe: {
+    height: 3,
+    width: '100%',
+  },
+  tableHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two,
+    borderBottomWidth: 1,
+    gap: 3,
+  },
+  tableHeaderCell: {
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textAlign: 'center',
+  },
+  legendRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  legendDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  legendLabel: {
+    fontSize: 7.5,
+    letterSpacing: 0.2,
+  },
+
   // Web list cards
   webListCard: {
     borderRadius: Spacing.three,
@@ -1324,9 +1225,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     ...cardShadow({ opacity: 0.15, radius: 10, offsetY: 4, elevation: 2 }),
   },
-  webList: {
-    maxHeight: 260,
-  },
+  webList: { maxHeight: 260 },
   webListItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1351,244 +1250,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  // Telemetry card
-  telemetryCard: {
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    overflow: 'hidden',
-    gap: Spacing.three,
-    padding: Spacing.three,
-    position: 'relative',
-    ...cardShadow({ opacity: 0.25, radius: 12, offsetY: 6, elevation: 4 }),
-  },
-  stripe: {
-    height: 3,
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-  },
-  telemetryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    marginTop: 4,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  telemetryTitle: {
-    letterSpacing: 1,
-    fontSize: 10.5,
-    flex: 1,
-  },
-  drsBadgeActive: {
-    backgroundColor: '#22c55e',
-    borderRadius: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 1,
-    borderWidth: 1,
-    borderColor: '#15803d',
-  },
-  drsBadgeInactive: {
-    backgroundColor: '#334155',
-    borderRadius: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 1,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-  },
-  drsText: {
-    fontSize: 8.5,
-    fontWeight: 'bold',
-    color: '#000',
-  },
-  drsTextInactive: {
-    fontSize: 8.5,
-    fontWeight: 'bold',
-    color: '#94a3b8',
-  },
-
-  // Gauges
-  gaugesRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  gaugeItem: {
-    flex: 1.1,
-    alignItems: 'center',
-  },
-  dialCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 3.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  dialValue: {
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  dialUnit: {
-    fontSize: 8,
-    marginTop: -2,
-    letterSpacing: 0.5,
-  },
-  gearBox: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    borderWidth: 2.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#020205',
-    borderColor: 'rgba(255,255,255,0.05)',
-  },
-  gearLabel: {
-    fontSize: 7.5,
-    letterSpacing: 0.5,
-    marginBottom: -6,
-  },
-  gearValue: {
-    fontSize: 34,
-    fontWeight: 'bold',
-  },
-
-  // Pedals
-  pedalsRow: {
-    flexDirection: 'row',
-    gap: Spacing.three,
-    padding: Spacing.two,
-    borderRadius: Spacing.two,
-    borderWidth: 1,
-  },
-  pedalCol: {
-    flex: 1,
-    gap: Spacing.one,
-  },
-  pedalTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  pedalLabel: {
-    fontSize: 8.5,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  pedalPct: {
-    fontSize: 9.5,
-    fontWeight: 'bold',
-  },
-  pedalTrack: {
-    height: 50,
-    borderRadius: Spacing.one,
-    overflow: 'hidden',
-    position: 'relative',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.02)',
-  },
-  pedalFill: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    borderRadius: Spacing.one,
-  },
-
-  // Playback controls
-  playbackSection: {
-    gap: Spacing.two,
-    paddingTop: Spacing.two,
-    borderTopWidth: 1,
-  },
-  progressArea: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  progressTime: {
-    fontSize: 9,
-    letterSpacing: 0.5,
-    minWidth: 32,
-    textAlign: 'center',
-  },
-  progressTrack: {
-    flex: 1,
-    height: 6,
-    borderRadius: 3,
-    overflow: 'visible',
-    position: 'relative',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 3,
-    position: 'absolute',
-    left: 0,
-    top: 0,
-  },
-  progressThumb: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    position: 'absolute',
-    top: -4,
-    marginLeft: -7,
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    justifyContent: 'center',
-    flexWrap: 'wrap',
-  },
-  controlBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...cardShadow({ opacity: 0.4, radius: 10, offsetY: 4, elevation: 4 }),
-  },
-  speedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginLeft: Spacing.two,
-  },
-  speedBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderWidth: 1.5,
-  },
-  speedLabel: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  frameCounter: {
-    textAlign: 'center',
-    fontSize: 9,
-    letterSpacing: 0.5,
-  },
-
-  // Loading / empty card
+  // Loading / empty
   loadingCard: {
-    minHeight: 260,
+    minHeight: 220,
     borderRadius: Spacing.three,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1597,8 +1261,8 @@ const styles = StyleSheet.create({
   },
   loadingLabel: {
     fontSize: 12,
+    marginTop: Spacing.two,
     textAlign: 'center',
-    letterSpacing: 0.3,
   },
   loadingSubLabel: {
     fontSize: 10,
@@ -1611,50 +1275,47 @@ const styles = StyleSheet.create({
     marginTop: Spacing.two,
   },
 
-  // Modal
+  // Modals
   modalOverlay: {
     flex: 1,
-    justifyContent: 'flex-end',
     backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
   },
   modalSheet: {
     borderTopLeftRadius: Spacing.four,
     borderTopRightRadius: Spacing.four,
     borderWidth: 1,
     maxHeight: '75%',
+    paddingTop: Spacing.two,
   },
   modalHandle: {
-    alignSelf: 'center',
     width: 40,
     height: 4,
     borderRadius: 2,
-    marginTop: Spacing.two,
+    alignSelf: 'center',
     marginBottom: Spacing.two,
   },
   modalHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: Spacing.three,
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.four,
     paddingBottom: Spacing.two,
   },
   closeBtn: {
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.one,
-    borderRadius: Spacing.two,
+    paddingVertical: 5,
+    borderRadius: Spacing.one,
   },
   closeBtnText: {
-    fontSize: 10,
-    fontWeight: 'bold',
+    fontSize: 9,
     letterSpacing: 0.5,
   },
-  pickerList: {
-    maxHeight: 420,
-  },
+  pickerList: { maxHeight: 500 },
   pickerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Spacing.three,
+    paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderBottomWidth: 1,
     gap: Spacing.two,

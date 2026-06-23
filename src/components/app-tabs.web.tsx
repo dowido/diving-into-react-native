@@ -31,7 +31,7 @@ export default function AppTabs() {
             <TabButton>Standings</TabButton>
           </TabTrigger>
           <TabTrigger name="replay" href="/replay" asChild>
-            <TabButton>Replay</TabButton>
+            <TabButton>Lap Times</TabButton>
           </TabTrigger>
         </CustomTabList>
       </TabList>

@@ -1,15 +1,14 @@
 /**
  * Pit Wall Hub — The Engine Room
  *
- * A high-density live session command center with three sub-views
+ * A high-density live session command center with two sub-views
  * toggled via an M3 Segmented Control:
  *
- *   A  Real-Time Track Map    — Live driver positions on circuit outline
- *   B  Telemetry Graph Deck   — 4-channel dual-driver overlay charts
- *   C  Timing Tower           — Full 20-driver matrix with S1/S2/S3 + pit log
+ *   A  Real-Time Track Map  — Live driver positions on circuit outline
+ *   B  Timing Tower         — Full 20-driver matrix with S1/S2/S3 + tyre + pit log
  *
- * Data sources: OpenF1 API (/sessions, /drivers, /position, /location,
- *               /car_data, /laps, /pit, /race_control)
+ * Data sources: OpenF1 API (/sessions, /drivers, /position, /laps, /pit, /race_control)
+ * No car_data / engine telemetry is fetched — it is not available reliably during live events.
  */
 
 import { useFocusEffect } from 'expo-router';
@@ -22,7 +21,6 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -30,22 +28,14 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-  Easing as RnEasing,
-} from 'react-native-reanimated';
 
 import { CircuitMap } from '@/components/circuit-map';
-import { SkiaTelemetryChart, CarDataFrame } from '@/components/skia-telemetry-chart';
 import { TimingTower, TimingDriver, PitStop } from '@/components/timing-tower';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import {
   BottomTabInset,
-  M3Motion,
   M3Shape,
   MaxContentWidth,
   Spacing,
@@ -56,7 +46,7 @@ import { apiCache, TTL } from '@/utils/api-cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type SubView = 'map' | 'telemetry' | 'timing';
+type SubView = 'map' | 'timing';
 
 interface Session {
   session_key: number;
@@ -115,10 +105,6 @@ function isLiveSession(s: Session | null): boolean {
   return now >= start && (!end || now <= end);
 }
 
-function teamColorHex(colour: string): string {
-  return colour?.startsWith('#') ? colour : `#${colour ?? '94a3b8'}`;
-}
-
 function getFlagColor(flag?: string): string {
   if (!flag) return '#94a3b8';
   switch (flag.toUpperCase()) {
@@ -139,16 +125,15 @@ function SegmentedControl({
   active,
   onChange,
 }: {
-  segments: { key: SubView; label: string; icon: string }[];
+  segments: { key: SubView; label: string }[];
   active: SubView;
   onChange: (v: SubView) => void;
 }) {
   const theme = useTheme();
-  const activeIdx = segments.findIndex(s => s.key === active);
 
   return (
     <View style={[segStyles.container, { backgroundColor: theme.surfaceVariant, borderColor: theme.outline }]}>
-      {segments.map((seg, idx) => {
+      {segments.map((seg) => {
         const isActive = seg.key === active;
         return (
           <Pressable
@@ -160,11 +145,6 @@ function SegmentedControl({
               pressed && !isActive && { opacity: 0.7 },
             ]}
           >
-            <SymbolView
-              name={{ ios: 'chart.line.uptrend.xyaxis' as any, android: 'bar_chart' as any, web: 'analytics' as any }}
-              size={13}
-              tintColor={isActive ? theme.primary : theme.textSecondary}
-            />
             <ThemedText
               style={[
                 segStyles.label,
@@ -261,25 +241,11 @@ export default function PitWallScreen() {
   // ── Race control messages ──────────────────────────────────────────────────
   const [raceControl, setRaceControl] = useState<RaceControlMsg[]>([]);
 
-  // ── Position data (for timing tower) ──────────────────────────────────────
+  // ── Position / lap / pit data ──────────────────────────────────────────────
   const [positionData, setPositionData] = useState<PositionEntry[]>([]);
   const [lapData, setLapData] = useState<LapData[]>([]);
   const [pitData, setPitData] = useState<PitStop[]>([]);
   const [timingDrivers, setTimingDrivers] = useState<TimingDriver[]>([]);
-
-  // ── Telemetry data (dual driver) ───────────────────────────────────────────
-  const [driverA, setDriverA] = useState<Driver | null>(null);
-  const [driverB, setDriverB] = useState<Driver | null>(null);
-  const [framesA, setFramesA] = useState<CarDataFrame[]>([]);
-  const [framesB, setFramesB] = useState<CarDataFrame[]>([]);
-  const [telemetryLoading, setTelemetryLoading] = useState(false);
-  const [currentIdxA, setCurrentIdxA] = useState(0);
-  const [currentIdxB, setCurrentIdxB] = useState(0);
-  const [isPlayingTelemetry, setIsPlayingTelemetry] = useState(false);
-  const playbackRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── Driver picker modal ────────────────────────────────────────────────────
-  const [pickerTarget, setPickerTarget] = useState<'A' | 'B' | null>(null);
 
   // ── Polling refs ───────────────────────────────────────────────────────────
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -352,10 +318,6 @@ export default function PitWallScreen() {
         const map = new Map<number, Driver>();
         sorted.forEach(d => map.set(d.driver_number, d));
         driversMapRef.current = map;
-
-        // Pre-select first two drivers for telemetry
-        if (sorted.length > 0) setDriverA(sorted[0]);
-        if (sorted.length > 1) setDriverB(sorted[1]);
       } catch (err) {
         console.warn('Drivers fetch error:', err);
       }
@@ -383,14 +345,19 @@ export default function PitWallScreen() {
       const sk = session.session_key;
       const isLive = isLiveSession(session);
 
-      // Positions
+      // For live sessions, only fetch the latest position entries (last 30s)
       const posUrl = isLive
         ? `https://api.openf1.org/v1/position?session_key=${sk}&date>${new Date(Date.now() - 30000).toISOString()}`
         : `https://api.openf1.org/v1/position?session_key=${sk}`;
 
+      // For live sessions, only fetch recent laps (last 5 minutes) to avoid massive responses
+      const lapUrl = isLive
+        ? `https://api.openf1.org/v1/laps?session_key=${sk}&date_start>${new Date(Date.now() - 300000).toISOString()}`
+        : `https://api.openf1.org/v1/laps?session_key=${sk}`;
+
       const [posRes, lapRes, pitRes] = await Promise.allSettled([
         fetchWithRetry(posUrl, 2),
-        fetchWithRetry(`https://api.openf1.org/v1/laps?session_key=${sk}`, 2),
+        fetchWithRetry(lapUrl, 2),
         fetchWithRetry(`https://api.openf1.org/v1/pit?session_key=${sk}`, 2),
       ]);
 
@@ -412,7 +379,15 @@ export default function PitWallScreen() {
       let laps: LapData[] = [];
       if (lapRes.status === 'fulfilled' && lapRes.value.ok) {
         laps = await lapRes.value.json();
-        setLapData(laps);
+        setLapData(prev => {
+          // For live sessions merge new laps on top of existing ones
+          if (!isLive) return laps;
+          const merged = new Map<string, LapData>();
+          for (const l of prev) merged.set(`${l.driver_number}_${l.lap_number}`, l);
+          for (const l of laps) merged.set(`${l.driver_number}_${l.lap_number}`, l);
+          return Array.from(merged.values());
+        });
+        laps = laps; // keep local var for timing build
       }
 
       // Process pits
@@ -422,9 +397,18 @@ export default function PitWallScreen() {
         setPitData(pits);
       }
 
-      // Build TimingDriver array
+      // Build TimingDriver array using the full lapData state merged
+      const allLaps = isLive
+        ? (() => {
+            const merged = new Map<string, LapData>();
+            for (const l of lapData) merged.set(`${l.driver_number}_${l.lap_number}`, l);
+            for (const l of laps) merged.set(`${l.driver_number}_${l.lap_number}`, l);
+            return Array.from(merged.values());
+          })()
+        : laps;
+
       const latestLap = new Map<number, LapData>();
-      for (const lap of laps) {
+      for (const lap of allLaps) {
         const existing = latestLap.get(lap.driver_number);
         if (!existing || lap.lap_number > existing.lap_number) latestLap.set(lap.driver_number, lap);
       }
@@ -436,14 +420,17 @@ export default function PitWallScreen() {
         driverPits.set(pit.driver_number, arr);
       }
 
-      const leaderLap = Math.max(0, ...Array.from(latestLap.values()).map(l => l.lap_number));
+      // If we have no position data yet, use drivers list as fallback
+      const orderSource = positions.length > 0 ? positions : drivers.map((d, i) => ({
+        driver_number: d.driver_number,
+        position: i + 1,
+        date: '',
+      }));
 
-      const timing: TimingDriver[] = positions.map((pos, i) => {
+      const timing: TimingDriver[] = orderSource.map((pos, i) => {
         const driver = driversMapRef.current.get(pos.driver_number);
         const lap = latestLap.get(pos.driver_number);
         const pitHistory = driverPits.get(pos.driver_number) ?? [];
-
-        const gapToLeader = i === 0 ? 'LEADER' : `+${(i * 1.4 + Math.random() * 0.3).toFixed(3)}s`; // approximated — real data needs /position intervals
 
         return {
           position: pos.position,
@@ -451,10 +438,10 @@ export default function PitWallScreen() {
           acronym: driver?.name_acronym ?? `#${pos.driver_number}`,
           teamColour: driver?.team_colour ?? '94a3b8',
           teamName: driver?.team_name ?? 'Unknown',
-          gap: gapToLeader,
-          interval: i === 0 ? '—' : `+${(Math.random() * 2).toFixed(3)}s`,
-          compound: lap?.compound ?? 'MEDIUM',
-          tyreAge: lap ? leaderLap - (lap.lap_number - (lap.tyre_age_at_start ?? 0)) : 0,
+          gap: i === 0 ? 'LEADER' : '—',
+          interval: '—',
+          compound: lap?.compound ?? 'UNKNOWN',
+          tyreAge: lap?.tyre_age_at_start != null ? lap.tyre_age_at_start : 0,
           lastLapTime: lap?.lap_duration ?? undefined,
           sectorTimes: lap ? {
             duration_sector_1: lap.duration_sector_1,
@@ -469,51 +456,8 @@ export default function PitWallScreen() {
     } catch (err) {
       console.warn('Timing data error:', err);
     }
-  }, [session]);
-
-  // ── Fetch telemetry for both drivers ──────────────────────────────────────
-  const fetchTelemetry = useCallback(async () => {
-    if (!session || !driverA) return;
-    setTelemetryLoading(true);
-    try {
-      const sk = session.session_key;
-      const isLive = isLiveSession(session);
-
-      const buildUrl = (driverNum: number) => {
-        let url = `https://api.openf1.org/v1/car_data?session_key=${sk}&driver_number=${driverNum}`;
-        if (!isLive && session.date_end) {
-          const end = new Date(session.date_end);
-          const start = new Date(end.getTime() - 120000); // last 2 min
-          url += `&date>=${start.toISOString()}&date<=${end.toISOString()}`;
-        } else if (isLive) {
-          const start = new Date(Date.now() - 60000);
-          url += `&date>=${start.toISOString()}`;
-        }
-        return url;
-      };
-
-      const [resA, resB] = await Promise.allSettled([
-        fetchWithRetry(buildUrl(driverA.driver_number), 2),
-        driverB ? fetchWithRetry(buildUrl(driverB.driver_number), 2) : Promise.resolve(null),
-      ]);
-
-      if (resA.status === 'fulfilled' && resA.value?.ok) {
-        const data: CarDataFrame[] = await resA.value.json();
-        setFramesA(data);
-        setCurrentIdxA(0);
-      }
-
-      if (resB.status === 'fulfilled' && resB.value?.ok) {
-        const data: CarDataFrame[] = await resB.value.json();
-        setFramesB(data);
-        setCurrentIdxB(0);
-      }
-    } catch (err) {
-      console.warn('Telemetry fetch error:', err);
-    } finally {
-      setTelemetryLoading(false);
-    }
-  }, [session, driverA, driverB]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, drivers, lapData]);
 
   // ── Poll on focus ─────────────────────────────────────────────────────────
   useFocusEffect(
@@ -523,7 +467,7 @@ export default function PitWallScreen() {
       fetchRaceControl();
       fetchTimingData();
 
-      const interval = isLiveSession(session) ? 8000 : 0;
+      const interval = isLiveSession(session) ? 10000 : 0;
       if (interval > 0) {
         pollRef.current = setInterval(() => {
           fetchRaceControl();
@@ -534,37 +478,9 @@ export default function PitWallScreen() {
       return () => {
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [session, fetchRaceControl, fetchTimingData])
   );
-
-  useEffect(() => {
-    if (session && driverA) fetchTelemetry();
-  }, [session, driverA, driverB, fetchTelemetry]);
-
-  // ── Telemetry playback ────────────────────────────────────────────────────
-  const startTelemetryPlayback = useCallback(() => {
-    if (framesA.length === 0) return;
-    setIsPlayingTelemetry(true);
-    playbackRef.current = setInterval(() => {
-      setCurrentIdxA(p => {
-        const n = p + 1;
-        if (n >= framesA.length) {
-          clearInterval(playbackRef.current!);
-          setIsPlayingTelemetry(false);
-          return framesA.length - 1;
-        }
-        return n;
-      });
-      setCurrentIdxB(p => Math.min(p + 1, framesB.length - 1));
-    }, 250);
-  }, [framesA, framesB]);
-
-  const stopTelemetryPlayback = useCallback(() => {
-    if (playbackRef.current) { clearInterval(playbackRef.current); playbackRef.current = null; }
-    setIsPlayingTelemetry(false);
-  }, []);
-
-  useEffect(() => () => stopTelemetryPlayback(), [stopTelemetryPlayback]);
 
   // ── Build drivers map for circuit map ─────────────────────────────────────
   const driversMapForMap = React.useMemo(() => {
@@ -619,112 +535,6 @@ export default function PitWallScreen() {
     </View>
   );
 
-  const renderTelemetryView = () => (
-    <View style={styles.subViewContainer}>
-      {/* Driver selectors */}
-      <View style={styles.driverSelectors}>
-        {/* Driver A */}
-        <Pressable
-          onPress={() => setPickerTarget('A')}
-          style={({ pressed }) => [
-            styles.driverPill,
-            {
-              backgroundColor: driverA
-                ? teamColorHex(driverA.team_colour) + '22'
-                : theme.surfaceVariant,
-              borderColor: driverA ? teamColorHex(driverA.team_colour) : theme.outline,
-            },
-            pressed && { opacity: 0.7 },
-          ]}
-        >
-          <View style={[styles.driverPillPip, { backgroundColor: driverA ? teamColorHex(driverA.team_colour) : theme.outline }]} />
-          <ThemedText style={[styles.driverPillText, { color: driverA ? teamColorHex(driverA.team_colour) : theme.textSecondary }]}>
-            {driverA?.name_acronym ?? 'SELECT'}
-          </ThemedText>
-        </Pressable>
-
-        <ThemedText style={styles.vsLabel} themeColor="textSecondary">VS</ThemedText>
-
-        {/* Driver B */}
-        <Pressable
-          onPress={() => setPickerTarget('B')}
-          style={({ pressed }) => [
-            styles.driverPill,
-            {
-              backgroundColor: driverB
-                ? teamColorHex(driverB.team_colour) + '22'
-                : theme.surfaceVariant,
-              borderColor: driverB ? teamColorHex(driverB.team_colour) : theme.outline,
-            },
-            pressed && { opacity: 0.7 },
-          ]}
-        >
-          <View style={[styles.driverPillPip, { backgroundColor: driverB ? teamColorHex(driverB.team_colour) : theme.outline }]} />
-          <ThemedText style={[styles.driverPillText, { color: driverB ? teamColorHex(driverB.team_colour) : theme.textSecondary }]}>
-            {driverB?.name_acronym ?? 'SELECT'}
-          </ThemedText>
-        </Pressable>
-      </View>
-
-      {telemetryLoading ? (
-        <View style={styles.loadingCenter}>
-          <ActivityIndicator size="large" color={theme.primary} />
-          <ThemedText style={styles.loadingText} themeColor="textSecondary">Loading telemetry…</ThemedText>
-        </View>
-      ) : framesA.length === 0 ? (
-        <View style={styles.loadingCenter}>
-          <SymbolView name={{ ios: 'waveform.path', android: 'ssid_chart', web: 'ssid_chart' }} size={36} tintColor={theme.outline} />
-          <ThemedText style={styles.loadingText} themeColor="textSecondary">No telemetry data</ThemedText>
-        </View>
-      ) : (
-        <>
-          <SkiaTelemetryChart
-            framesA={framesA}
-            framesB={framesB.length > 0 ? framesB : undefined}
-            colorA={driverA ? teamColorHex(driverA.team_colour) : theme.neonTeal}
-            colorB={driverB ? teamColorHex(driverB.team_colour) : undefined}
-            labelA={driverA?.name_acronym}
-            labelB={driverB?.name_acronym}
-            currentIndexA={currentIdxA}
-            currentIndexB={currentIdxB}
-            chartHeight={52}
-          />
-
-          {/* Playback controls */}
-          <View style={styles.playbackRow}>
-            <Pressable
-              onPress={() => { stopTelemetryPlayback(); setCurrentIdxA(0); setCurrentIdxB(0); }}
-              style={({ pressed }) => [styles.ctrlBtn, { backgroundColor: theme.surfaceVariant }, pressed && { opacity: 0.6 }]}
-            >
-              <SymbolView name={{ ios: 'backward.end.fill', android: 'skip_previous', web: 'skip_previous' }} size={14} tintColor={theme.text} />
-            </Pressable>
-
-            <Pressable
-              onPress={isPlayingTelemetry ? stopTelemetryPlayback : startTelemetryPlayback}
-              style={({ pressed }) => [styles.playBtn, { backgroundColor: theme.primary }, pressed && { opacity: 0.8 }]}
-            >
-              <SymbolView
-                name={isPlayingTelemetry
-                  ? { ios: 'pause.fill', android: 'pause', web: 'pause' }
-                  : { ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }
-                }
-                size={18}
-                tintColor="#fff"
-              />
-            </Pressable>
-
-            <View style={[styles.progressTrack, { backgroundColor: theme.outline }]}>
-              <View style={[styles.progressFill, {
-                backgroundColor: theme.primary,
-                width: `${framesA.length > 1 ? (currentIdxA / (framesA.length - 1)) * 100 : 0}%` as any,
-              }]} />
-            </View>
-          </View>
-        </>
-      )}
-    </View>
-  );
-
   const renderTimingView = () => (
     <View style={styles.subViewContainer}>
       <TimingTower
@@ -733,53 +543,6 @@ export default function PitWallScreen() {
         isLive={isLiveSession(session)}
       />
     </View>
-  );
-
-  // ── Driver picker modal ───────────────────────────────────────────────────
-
-  const renderDriverPicker = () => (
-    <Modal
-      visible={pickerTarget !== null}
-      transparent
-      animationType="slide"
-      onRequestClose={() => setPickerTarget(null)}
-    >
-      <Pressable style={styles.modalBackdrop} onPress={() => setPickerTarget(null)}>
-        <ThemedView style={[styles.pickerSheet, { borderColor: theme.outline }]}>
-          <View style={[styles.sheetHandle, { backgroundColor: theme.outline }]} />
-          <ThemedText style={styles.pickerTitle}>
-            Select Driver {pickerTarget}
-          </ThemedText>
-          <ScrollView style={styles.pickerScroll} showsVerticalScrollIndicator={false}>
-            {drivers.map(d => {
-              const color = teamColorHex(d.team_colour);
-              return (
-                <Pressable
-                  key={d.driver_number}
-                  onPress={() => {
-                    if (pickerTarget === 'A') setDriverA(d);
-                    else setDriverB(d);
-                    setPickerTarget(null);
-                  }}
-                  style={({ pressed }) => [
-                    styles.pickerRow,
-                    { borderBottomColor: theme.outline },
-                    pressed && { opacity: 0.7 },
-                  ]}
-                >
-                  <View style={[styles.pickerColorDot, { backgroundColor: color }]} />
-                  <View style={styles.pickerDriverInfo}>
-                    <ThemedText style={[styles.pickerAcronym, { color }]}>{d.name_acronym}</ThemedText>
-                    <ThemedText style={styles.pickerFullName} themeColor="textSecondary" numberOfLines={1}>{d.full_name}</ThemedText>
-                  </View>
-                  <ThemedText style={styles.pickerTeam} themeColor="textSecondary" numberOfLines={1}>{d.team_name}</ThemedText>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        </ThemedView>
-      </Pressable>
-    </Modal>
   );
 
   // ── Main render ───────────────────────────────────────────────────────────
@@ -823,9 +586,8 @@ export default function PitWallScreen() {
         {/* ── Segmented control ── */}
         <SegmentedControl
           segments={[
-            { key: 'map',      label: 'MAP',      icon: 'map' },
-            { key: 'telemetry', label: 'TELEMETRY', icon: 'waveform' },
-            { key: 'timing',   label: 'TIMING',   icon: 'list.bullet' },
+            { key: 'map',    label: 'MAP' },
+            { key: 'timing', label: 'TIMING' },
           ]}
           active={activeView}
           onChange={setActiveView}
@@ -844,16 +606,13 @@ export default function PitWallScreen() {
           </View>
         ) : (
           <>
-            {activeView === 'map'       && renderMapView()}
-            {activeView === 'telemetry' && renderTelemetryView()}
-            {activeView === 'timing'    && renderTimingView()}
+            {activeView === 'map'    && renderMapView()}
+            {activeView === 'timing' && renderTimingView()}
           </>
         )}
 
         {Platform.OS === 'web' && <WebBadge />}
       </ThemedView>
-
-      {renderDriverPicker()}
     </ScrollView>
   );
 }
@@ -978,73 +737,6 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  // Telemetry view
-  driverSelectors: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  driverPill: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderRadius: M3Shape.md,
-    borderWidth: 1.5,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.three,
-  },
-  driverPillPip: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    flexShrink: 0,
-  },
-  driverPillText: {
-    fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  vsLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1,
-  },
-
-  // Playback controls
-  playbackRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    marginTop: Spacing.one,
-  },
-  ctrlBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: M3Shape.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  playBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  progressTrack: {
-    flex: 1,
-    height: 4,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: 4,
-    borderRadius: 2,
-  },
-
   // Loading
   loadingCenter: {
     alignItems: 'center',
@@ -1056,52 +748,4 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
   },
-
-  // Driver picker modal
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
-  pickerSheet: {
-    borderTopLeftRadius: M3Shape.xl,
-    borderTopRightRadius: M3Shape.xl,
-    borderWidth: 1,
-    paddingTop: Spacing.three,
-    paddingBottom: Spacing.six,
-    maxHeight: '70%',
-  },
-  sheetHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginBottom: Spacing.three,
-  },
-  pickerTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    letterSpacing: 1,
-    paddingHorizontal: Spacing.four,
-    marginBottom: Spacing.two,
-  },
-  pickerScroll: { maxHeight: 400 },
-  pickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
-    borderBottomWidth: 1,
-  },
-  pickerColorDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    flexShrink: 0,
-  },
-  pickerDriverInfo: { flex: 1, gap: 2 },
-  pickerAcronym: { fontSize: 14, fontWeight: '800', letterSpacing: 0.5 },
-  pickerFullName: { fontSize: 10, letterSpacing: 0.2 },
-  pickerTeam: { fontSize: 10, letterSpacing: 0.2, flexShrink: 0, maxWidth: 100 },
 });

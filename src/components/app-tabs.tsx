@@ -44,10 +44,10 @@ export default function AppTabs() {
       </NativeTabs.Trigger>
 
       <NativeTabs.Trigger name="replay">
-        <NativeTabs.Trigger.Label>Replay</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>Lap Times</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          sf="arrow.clockwise.circle.fill"
-          md="history"
+          sf="stopwatch.fill"
+          md="timer"
           src={require('@/assets/images/tabIcons/replay.png')}
           renderingMode="template"
         />
