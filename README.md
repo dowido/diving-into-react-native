@@ -1,4 +1,4 @@
-guerdycWelcome to your Expo app 👋
+guerdcWelcome to your Expo app 👋
 t
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
